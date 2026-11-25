@@ -54,6 +54,7 @@ function renderStatus(s) {
     ['Current version', s.version.current === null ? 'none' : `v${s.version.current}`],
     ['Versions saved', s.version.count],
     ['AI usage', `${s.budget.used} / ${s.budget.total} tokens`],
+    ...(s.budget.problem ? [['Usage record problem', s.budget.problem]] : []),
     ['Node', s.node],
   ];
   statusList.replaceChildren();

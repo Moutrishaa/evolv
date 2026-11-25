@@ -4,6 +4,9 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { ensureSeeded } from '../supervisor/versions.js';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 
@@ -92,4 +95,23 @@ export function makeSandboxFixture() {
   fs.copyFileSync(path.join(ROOT, 'test-fixtures', 'hostile-app', 'server.js'), path.join(appDir, 'server.js'));
   fs.writeFileSync(path.join(appDir, 'package.json'), '{ "type": "module" }\n');
   return { root: tmp.dir, appDir, dataDir, cleanup: tmp.cleanup };
+}
+
+const execFileP = promisify(execFile);
+
+/** Runs git with execFile (never a shell) and returns stdout. */
+export async function gitOut(cwd, args) {
+  const { stdout } = await execFileP('git', args, { cwd, windowsHide: true, maxBuffer: 20 * 1024 * 1024 });
+  return stdout;
+}
+
+/** A real seeded app repo (version 1) plus state/ and state/workspaces/ in a temp root. */
+export async function makeSeededApp() {
+  const tmp = makeTempDir('evolv-app-');
+  const appDir = path.join(tmp.dir, 'app');
+  await ensureSeeded({ seedDir: path.join(ROOT, 'seed'), appDir });
+  const stateDir = path.join(tmp.dir, 'state');
+  const workspacesDir = path.join(stateDir, 'workspaces');
+  fs.mkdirSync(workspacesDir, { recursive: true });
+  return { root: tmp.dir, appDir, stateDir, workspacesDir, cleanup: tmp.cleanup };
 }

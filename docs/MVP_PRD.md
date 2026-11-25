@@ -66,13 +66,14 @@ Project layout:
 ```
 evolv/
   supervisor/  main.js agent.js tools.js workspace.js verify.js process.js versions.js budget.js
-               config.js proxy.js api.js auth.js console-link.js
+               config.js proxy.js api.js auth.js console-link.js pathguard.js changes.js
                providers/anthropic.js
   console/     index.html console.js console.css
   seed/        server.js evolv.json public/
   test/
   app/         created at runtime, own git repo, git-ignored
-  state/       usage ledger, settings and console.key, git-ignored, unreadable by the app sandbox
+  state/       usage.json (token ledger), console.key and workspaces/ (staging copies), git-ignored,
+               unreadable by the app sandbox
   .env.example
 ```
 
@@ -126,13 +127,19 @@ Any failure or cancel discards the workspace. The live app is untouched. No repa
 |---|---|---|
 | list_files | dir? | Excludes hidden and protected paths |
 | read_file | path, from_line?, to_line? | Line numbers, max 2,000 lines |
-| search | pattern, dir? | Max 100 matches |
+| search | pattern, dir? | Max 100 matches. `pattern` is **literal text, not a regular expression** (see note below) |
 | write_file | path, content | Max 200 KB |
 | edit_file | path, old_text, new_text | old_text must occur exactly once, else return an error |
 | delete_file | path | Cannot delete the entry point or evolv.json |
 | finish | summary | One sentence for a non-developer; moves to verify |
 
 A tool error goes back to the agent as a result. It never crashes the loop.
+
+**Deliberate change from the full PRD: `search` is literal, not regex.** The agent chooses the pattern, and a catastrophic regular expression such as `(a+)+$` blocks Node's single thread. The supervisor would freeze, and the recovery console with it (verified: a regex-based search froze the test run until killed). Matching is plain, case-sensitive text, 1 to 200 characters. Search also skips hidden and protected paths, binary files and files over 1 MB.
+
+**Path rules (one strict set on every OS, enforced by `supervisor/pathguard.js`):** forward slashes only; no `..`, absolute paths, drive letters or `:`; no trailing dot or space, reserved device names or 8.3 short names (`GIT~1`); no symlinks or junctions anywhere on the path. Protected and invisible, in any letter case: any name starting `.git` (so `.gitignore` and `.gitattributes` too), any name starting `.env`, `node_modules` at any depth, and `data/` at the app root. Protected paths are reported to the agent exactly like missing ones.
+
+**Token accounting:** counts input plus output tokens from every call. A call interrupted by cancel or timeout has unknown real usage, so it is counted as an estimate of one token per 4 characters of the request, rounded up. A damaged `state/usage.json` blocks new changes with a plain-words message naming the file. It is never reset to zero silently.
 
 System prompt must say: edit only what the request needs; the app contract (below); the chat widget must keep working and keep calling the supervisor API; the "Recovery console" link must stay; finish with a one-sentence summary.
 
@@ -173,7 +180,7 @@ POST /changes, GET /changes/:id/events, POST /changes/:id/cancel, GET /versions,
 
 Unauthenticated: 401 `unauthorized`. Wrong Origin or Host: 403 `forbidden`.
 
-Errors: `{ error: { code, message } }` with codes busy, budget_exhausted, invalid_request, verify_failed, agent_limit, provider_error, cancelled, plus unauthorized, forbidden, not_found, internal_error.
+Errors: `{ error: { code, message } }` with codes busy, budget_exhausted, invalid_request, verify_failed, agent_limit, provider_error, cancelled, plus unauthorized, forbidden, not_found, internal_error, and ledger_unreadable (503, a damaged usage file).
 
 ## 11. Configuration (.env, never committed)
 
@@ -194,7 +201,7 @@ CONSOLE_PORT=3002
 ## 12. Build plan (one at a time; commit after each green step)
 
 - **B1 Foundation:** supervisor start-up, seed, version 1, sandboxed app process, proxy, console Status and Logs. Sandbox tests (hostile app) pass.
-- **B2 Agent:** path guard and tools with unit tests, workspace staging, budget ledger, fake provider, Anthropic adapter, tool loop. A fake-provider change succeeds end to end.
+- **B2 Agent:** path guard and tools with unit tests, workspace staging, budget ledger, fake provider, Anthropic adapter, tool loop. A fake-provider change succeeds end to end. Until B3 there is no verify or promote: a finished change reports its summary, changed files, diff and token cost, then the staging copy is discarded and the live app is untouched. No HTTP routes and no chat-widget wiring yet; both arrive in B3.
 - **B3 Safe promotion:** verifier, promote and discard, SSE progress, cancel.
 - **B4 History:** undo, restore, reset, diff, console History and Chat pages.
 

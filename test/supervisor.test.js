@@ -4,10 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { startSupervisor } from '../supervisor/main.js';
 import { loadConfig } from '../supervisor/config.js';
-import { makeTempDir, getFreePort, getConsolePortFor, request, waitFor, ROOT } from '../test-fixtures/helpers.js';
+import { makeTempDir, getFreePort, getConsolePortFor, request, waitFor, gitOut, ROOT } from '../test-fixtures/helpers.js';
+import { startFakeProvider, reply, toolUse } from '../test-fixtures/fake-provider.js';
+import { ensureSeeded } from '../supervisor/versions.js';
+import { createWorkspace } from '../supervisor/workspace.js';
+import { newChangeId } from '../supervisor/changes.js';
 
 // End to end for B1: real seed, real sandboxed app, real proxy, real console on its own port.
-let tmp, sup, base, cbase, auth;
+let tmp, sup, base, cbase, auth, fake;
 const AI_KEY = 'sk-test-key-must-never-appear';
 
 before(async () => {
@@ -21,7 +25,16 @@ before(async () => {
     envText: `AI_API_KEY=${AI_KEY}`,
     env: { PORT: String(port), CONSOLE_PORT: String(consolePort) },
   });
-  sup = await startSupervisor({ config, root: tmp.dir, appPort });
+  fake = await startFakeProvider({
+    apiKey: AI_KEY,
+    script: [
+      reply([toolUse('read_file', { path: 'public/style.css' })]),
+      reply([toolUse('edit_file', { path: 'public/style.css', old_text: '#fafafa', new_text: '#000080' })]),
+      reply([toolUse('finish', { summary: 'Made the page navy.' })]),
+    ],
+  });
+  // aiBaseUrl is a code-level test seam, never an environment or .env setting.
+  sup = await startSupervisor({ config, root: tmp.dir, appPort, aiBaseUrl: fake.url });
   base = `http://127.0.0.1:${port}`;
   cbase = `http://127.0.0.1:${consolePort}`;
   auth = { Authorization: `Bearer ${sup.consoleKey}` };
@@ -32,6 +45,7 @@ before(async () => {
 });
 
 after(async () => {
+  await fake?.close();
   await sup?.close();
   tmp?.cleanup();
 });
@@ -130,5 +144,84 @@ test('restarting the supervisor keeps version 1, data/ and the same console key'
     assert.equal(sup2.consoleKey, sup.consoleKey, 'a saved browser login must survive restarts');
   } finally {
     await sup2.close();
+  }
+});
+
+// ---------- B2: the agent is wired in ----------
+test('a change runs through the supervisor with the fake provider, and Status shows real usage', async () => {
+  const before = JSON.parse((await request(`${cbase}/api/status`, { headers: auth })).body);
+  assert.equal(before.budget.used, 0);
+  const { done } = sup.changes.start('Change the background to dark navy');
+  const result = await done;
+  assert.equal(result.summary, 'Made the page navy.');
+  assert.deepEqual(result.changedFiles, [{ path: 'public/style.css', status: 'modified' }]);
+
+  const after = JSON.parse((await request(`${cbase}/api/status`, { headers: auth })).body);
+  assert.equal(after.budget.used, 450);
+  assert.equal(after.budget.total, 300000);
+  assert.equal(after.budget.problem ?? null, null);
+  // Nothing went live (that is B3): the live app is untouched and the staging copy is gone.
+  assert.equal((await gitOut(path.join(tmp.dir, 'app'), ['status', '--porcelain'])).trim(), '');
+  assert.deepEqual(fs.readdirSync(path.join(tmp.dir, 'state', 'workspaces')), []);
+});
+
+test('the AI key appears nowhere: not in status, logs, the ledger, the console key file or the app folder', async () => {
+  for (const p of ['/api/status', '/api/logs']) assert.ok(!(await request(`${cbase}${p}`, { headers: auth })).body.includes(AI_KEY));
+  const scan = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) scan(full);
+      else assert.ok(!fs.readFileSync(full).includes(AI_KEY), `key found in ${full}`);
+    }
+  };
+  scan(path.join(tmp.dir, 'state'));
+  scan(path.join(tmp.dir, 'app'));
+  assert.ok(fake.requests.every((r) => r.headers['x-api-key'] === AI_KEY && !r.raw.includes(AI_KEY)));
+});
+
+async function bareRoot() {
+  const t = makeTempDir('evolv-sup2-');
+  fs.cpSync(path.join(ROOT, 'seed'), path.join(t.dir, 'seed'), { recursive: true });
+  fs.cpSync(path.join(ROOT, 'console'), path.join(t.dir, 'console'), { recursive: true });
+  const port = await getFreePort();
+  const config = loadConfig({ envText: '', env: { PORT: String(port), CONSOLE_PORT: String(await getConsolePortFor(port)) } });
+  return { t, config };
+}
+
+test('a damaged usage file does not stop the supervisor: Status explains it and changes are refused', async () => {
+  const { t, config } = await bareRoot();
+  fs.mkdirSync(path.join(t.dir, 'state'), { recursive: true });
+  const ledgerFile = path.join(t.dir, 'state', 'usage.json');
+  fs.writeFileSync(ledgerFile, 'this is not json');
+  const sup2 = await startSupervisor({ config, root: t.dir, appPort: await getFreePort() });
+  try {
+    const res = await request(`http://127.0.0.1:${config.consolePort}/api/status`, { headers: { Authorization: `Bearer ${sup2.consoleKey}` } });
+    assert.equal(res.status, 200);
+    const s = JSON.parse(res.body);
+    assert.ok(s.budget.problem.includes(ledgerFile));
+    assert.match(s.budget.problem, /damaged/i);
+    assert.throws(() => sup2.changes.start('anything'), (e) => e.code === 'ledger_unreadable');
+    assert.equal(fs.readFileSync(ledgerFile, 'utf8'), 'this is not json');
+  } finally {
+    await sup2.close();
+    t.cleanup();
+  }
+});
+
+test('workspaces left behind by a crash are swept at start-up', async () => {
+  const { t, config } = await bareRoot();
+  const appDir = path.join(t.dir, 'app');
+  await ensureSeeded({ seedDir: path.join(t.dir, 'seed'), appDir });
+  const workspacesDir = path.join(t.dir, 'state', 'workspaces');
+  fs.mkdirSync(workspacesDir, { recursive: true });
+  const left = await createWorkspace({ appDir, workspacesDir, id: newChangeId() });
+  assert.ok(fs.existsSync(left.dir));
+  const sup2 = await startSupervisor({ config, root: t.dir, appPort: await getFreePort() });
+  try {
+    assert.deepEqual(fs.readdirSync(workspacesDir), []);
+    assert.ok(!(await gitOut(appDir, ['worktree', 'list'])).includes(left.id));
+  } finally {
+    await sup2.close();
+    t.cleanup();
   }
 });

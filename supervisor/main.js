@@ -10,16 +10,30 @@ import { ensureSeeded, listVersions } from './versions.js';
 import { createProxy } from './proxy.js';
 import { createConsoleApi, createAppApi, createFrontHandler } from './api.js';
 import { ensureConsoleKey } from './auth.js';
+import { Ledger } from './budget.js';
+import { AnthropicProvider } from './providers/anthropic.js';
+import { ChangeRunner } from './changes.js';
+import { sweepWorkspaces } from './workspace.js';
 
 /**
- * @param {{ config: import('./config.js').Config, root: string, appPort?: number }} o
+ * @param {{ config: import('./config.js').Config, root: string, appPort?: number, aiBaseUrl?: string }} o
+ *   aiBaseUrl is a code-level test seam (the fake provider). It is never read from .env or the environment.
  */
-export async function startSupervisor({ config, root, appPort = config.port + 1 }) {
+export async function startSupervisor({ config, root, appPort = config.port + 1, aiBaseUrl }) {
   const appDir = path.join(root, 'app');
   const dataDir = path.join(appDir, 'data');
-  const consoleKey = ensureConsoleKey(path.join(root, 'state')); // outside app/: the sandbox cannot read it
+  const stateDir = path.join(root, 'state'); // outside app/: the sandbox cannot read it
+  const workspacesDir = path.join(stateDir, 'workspaces');
+  const consoleKey = ensureConsoleKey(stateDir);
 
   await ensureSeeded({ seedDir: path.join(root, 'seed'), appDir });
+  await sweepWorkspaces({ appDir, workspacesDir }); // nothing can be running yet: leftovers are from a crash
+
+  // A damaged usage file must not stop the supervisor (the console has to stay reachable):
+  // the ledger reports the problem and blocks changes instead.
+  const ledger = new Ledger({ file: path.join(stateDir, 'usage.json'), totalBudget: config.tokenBudget, changeLimit: config.changeTokenLimit });
+  const provider = new AnthropicProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl });
+  const changes = new ChangeRunner({ appDir, workspacesDir, provider, ledger, maxSteps: config.agentMaxSteps, timeoutMs: 5 * 60 * 1000 });
 
   const app = new AppProcess({ appDir, dataDir, port: appPort });
   const proxy = createProxy({ getPort: () => appPort });
@@ -37,8 +51,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1 
           body: {
             app: { ...st, uptimeMs: st.state === 'running' && st.startedAt ? Date.now() - st.startedAt : 0 },
             version: { current: versions[0]?.id ?? null, count: versions.length },
-            // B2 adds the real token ledger. Until then nothing has been spent.
-            budget: { used: 0, total: config.tokenBudget },
+            budget: ledger.snapshot(),
             node: process.version,
           },
         };
@@ -68,6 +81,8 @@ export async function startSupervisor({ config, root, appPort = config.port + 1 
     consoleServer,
     app,
     consoleKey,
+    changes,
+    ledger,
     async close() {
       await app.stop();
       for (const srv of [server, consoleServer]) {
