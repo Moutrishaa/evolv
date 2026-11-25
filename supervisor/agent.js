@@ -31,7 +31,9 @@ export function buildSystemPrompt() {
   ].join('\n');
 }
 
-const NUDGE = 'You did not call a tool. Use the tools to make the change. When it is complete, call finish with one sentence summarising what changed.';
+const MAX_FORMAT_FAILURES = 3;
+
+const NUDGE ='You did not call a tool. Use the tools to make the change. When it is complete, call finish with one sentence summarising what changed.';
 
 /** @param {unknown} input */
 const fileHint = (input) => {
@@ -60,6 +62,7 @@ export async function runAgent({ provider, tools, request, ledger, changeId, max
   const cancelled = () => new AgentError('cancelled', 'The change was cancelled.');
   /** @type {any[]} */
   const messages = [{ role: 'user', content: `The user's request:\n\n${request}` }];
+  let formatFailures = 0; // consecutive replies the provider rejected as malformed tool calls
 
   /** Ledger problems become agent errors with the same code and wording. @param {any} err */
   const asAgentError = (err) => (err && ['budget_exhausted', 'agent_limit', 'ledger_unreadable'].includes(err.code) ? new AgentError(err.code, err.message) : err);
@@ -100,6 +103,17 @@ export async function runAgent({ provider, tools, request, ledger, changeId, max
       ledger.record(changeId, { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens });
     } catch (err) {
       throw asAgentError(err);
+    }
+
+    // Some providers reject a model's malformed tool call themselves (the adapter reports that as
+    // `toolFormatFailure`). The model gets told and tries again, but each try costs tokens, so a model
+    // that keeps doing it is stopped after a few instead of burning the budget until the step limit.
+    if (response.toolFormatFailure) {
+      if (++formatFailures >= MAX_FORMAT_FAILURES) {
+        throw new AgentError('provider_error', 'The AI model keeps producing tool calls that the provider rejects as invalid JSON. Try again, or set a different AI_MODEL in the .env file.');
+      }
+    } else {
+      formatFailures = 0;
     }
 
     // The API rejects an empty assistant message, so never send one back.

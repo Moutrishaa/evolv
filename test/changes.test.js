@@ -350,3 +350,21 @@ test('the rollback notice is cleared by the next successful change', async () =>
   assert.equal(second.version.id, 2);
   assert.equal(env.runner.notice, null);
 });
+
+// ---------- what the user reads when a change fails ----------
+test('a failure message that does not end in a full stop gets one before "Your app was not changed."', async () => {
+  const env = await setup({ script: [httpError(400, 'messages: text content blocks must be non-empty')] });
+  const started = env.runner.start('go');
+  await started.done.catch(() => {});
+  const message = env.events.at(-1).message;
+  assert.match(message, /non-empty\. Your app was not changed\.$/);
+  assert.ok(!/non-empty Your/.test(message), 'two sentences must not run together');
+});
+
+test('a message that already ends in punctuation is not given a second one', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'I did nothing.' })])] });
+  const started = env.runner.start('do nothing');
+  await started.done.catch(() => {});
+  const message = env.events.at(-1).message;
+  assert.ok(!/\.\./.test(message) && !/\.\s*\./.test(message), message);
+});

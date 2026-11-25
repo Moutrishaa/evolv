@@ -8,7 +8,7 @@ import path from 'node:path';
 import { startSupervisor } from '../supervisor/main.js';
 import { loadConfig } from '../supervisor/config.js';
 import { startEnv, openaiChangeScript, AI_KEY } from '../test-fixtures/env.js';
-import { chatReply, call, apiError } from '../test-fixtures/fake-openai.js';
+import { chatReply, call, apiError, toolUseFailed } from '../test-fixtures/fake-openai.js';
 import { startPoller } from '../test-fixtures/net.js';
 import { makeTempDir, getFreePort, getConsolePortFor, request, gitOut, ROOT } from '../test-fixtures/helpers.js';
 
@@ -170,6 +170,43 @@ test('the app origin never reveals which provider is in use', async () => {
       const body = (await request(`${env.base}${p}`)).body;
       assert.ok(!/test-model-x|127\.0\.0\.1:\d+\/v1|openai/i.test(body.replace(/Recovery console|127\.0\.0\.1:\d+\/#?/g, '')), p);
     }
+  } finally {
+    await env.close();
+  }
+});
+
+// ---------- a model whose tool calls the provider sometimes rejects (seen with Groq) ----------
+test('a tool call the provider rejects as invalid JSON is retried with a hint, and the change still goes live', async () => {
+  const good = openaiChangeScript({ 'public/style.css': NAVY_CSS }, 'Made the page navy.')[0];
+  const env = await openai({ script: (body, n) => (n === 0 ? toolUseFailed() : good) });
+  try {
+    const { last } = await env.runChange('Make it navy');
+    assert.equal(last.type, 'done', JSON.stringify(last));
+    assert.equal(env.fake.requests.length, 2);
+    const second = env.fake.requests[1].body.messages;
+    assert.match(JSON.stringify(second.filter((m) => m.role === 'assistant')), /not valid JSON/);
+    assert.match(second.at(-1).content, /did not call a tool/i);
+    assert.ok((await env.status()).budget.used > 0, 'the failed attempt was counted');
+  } finally {
+    await env.close();
+  }
+});
+
+test('a model that keeps failing stops after three tries, in plain words, with the app untouched', async () => {
+  const env = await openai({ script: [toolUseFailed()] });
+  try {
+    const pid = env.sup.app.status().pid;
+    const { events, last } = await env.runChange('Make it navy');
+    assert.equal(last.type, 'failed');
+    assert.equal(last.data.code, 'provider_error');
+    assert.match(last.data.message, /keeps producing/i);
+    assert.match(last.data.message, /AI_MODEL/);
+    assert.match(last.data.message, /\. Your app was not changed\.$/, 'two clear sentences');
+    assert.ok(!/HTTP 400|Failed to parse/.test(last.data.message), 'no raw provider error text');
+    assert.equal(env.fake.requests.length, 3);
+    assert.equal(env.sup.app.status().pid, pid);
+    assert.equal((await env.versions()).length, 1);
+    await assertKeyNowhere(env, events);
   } finally {
     await env.close();
   }

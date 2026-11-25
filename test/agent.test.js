@@ -314,3 +314,43 @@ test('a finish call with an inputError does not finish the change', async () => 
   assert.equal(result.summary, 'Properly done.');
   assert.equal(result.steps, 2);
 });
+
+// ---------- the provider rejecting the model's own malformed tool call ----------
+const formatFailure = () => ({
+  content: [{ type: 'text', text: 'My last tool call was not valid JSON, so it was not run. I will call the tool again with valid JSON arguments.' }],
+  stopReason: 'end_turn', usage: { inputTokens: 400, outputTokens: 30 }, estimated: true, toolFormatFailure: true,
+});
+const callOf = (name, input, id) => ({ content: [{ type: 'tool_use', id, name, input }], stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 }, estimated: false });
+const scripted = (results) => {
+  const sent = [];
+  return { sent, assertReady() {}, async complete({ messages }) { sent.push(JSON.parse(JSON.stringify(messages))); return results[Math.min(sent.length - 1, results.length - 1)]; } };
+};
+
+test('a rejected tool call is told to the model, costs its estimate, and the change carries on', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
+  const stub = scripted([formatFailure(), callOf('finish', { summary: 'Recovered.' }, 'f1')]);
+  const result = await env.run({ provider: stub });
+  assert.equal(result.summary, 'Recovered.');
+  assert.equal(result.steps, 2);
+  const second = stub.sent[1];
+  assert.equal(second.at(-2).role, 'assistant');
+  assert.match(JSON.stringify(second.at(-2).content), /not valid JSON/);
+  assert.match(String(second.at(-1).content), /did not call a tool/i, 'the usual nudge follows');
+  assert.equal(env.ledger.changeUsed('chg1'), 430 + 15, 'the failed attempt is paid for, estimate included');
+});
+
+test('three rejected tool calls in a row stop the change with a plain provider_error', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
+  const stub = scripted([formatFailure()]);
+  await assert.rejects(
+    () => env.run({ provider: stub }),
+    (e) => e.code === 'provider_error' && /keeps producing/i.test(e.message) && /AI_MODEL/.test(e.message),
+  );
+  assert.equal(stub.sent.length, 3, 'it gives up after three, not after forty steps of paying for failures');
+});
+
+test('a success in between resets the count', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
+  const stub = scripted([formatFailure(), formatFailure(), callOf('list_files', {}, 'l1'), formatFailure(), formatFailure(), callOf('finish', { summary: 'Done.' }, 'f1')]);
+  assert.equal((await env.run({ provider: stub })).summary, 'Done.');
+});

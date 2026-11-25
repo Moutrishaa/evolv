@@ -67,9 +67,11 @@ export function validateRequest(text) {
 function failureData(err) {
   const e = /** @type {any} */ (err);
   const unchanged = /not changed|unchanged|nothing was lost|previous version/i.test(err.message);
+  // Two sentences must never run together ("...as JSON Your app was not changed").
+  const sentence = /[.!?)]$/.test(err.message.trim()) ? err.message : `${err.message}.`;
   return {
     code: err.code,
-    message: unchanged ? err.message : `${err.message} Your app was not changed.`,
+    message: unchanged ? err.message : `${sentence} Your app was not changed.`,
     ...(e.output ? { output: e.output } : {}),
     ...(Array.isArray(e.checks) ? { checks: e.checks.map((/** @type {any} */ c) => ({ name: c.name, ok: c.ok, ...(c.detail ? { detail: c.detail } : {}) })) } : {}),
   };

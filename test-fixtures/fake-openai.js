@@ -29,11 +29,19 @@ export const chatReply = (opts = {}) => {
 };
 
 /** An error answer: { status, body, headers }. `error` fields land under body.error. */
-export const apiError = (status, message, { code, type = 'api_error', headers } = {}) => ({
+export const apiError = (status, message, { code, type = 'api_error', headers, failedGeneration } = {}) => ({
   status,
-  body: { error: { message, type, ...(code ? { code } : {}) } },
+  body: { error: { message, type, ...(code ? { code } : {}), ...(failedGeneration !== undefined ? { failed_generation: failedGeneration } : {}) } },
   ...(headers ? { headers } : {}),
 });
+
+/**
+ * What Groq answers when the MODEL produced a tool call whose arguments are not valid JSON:
+ * HTTP 400, code "tool_use_failed", and the raw text under failed_generation. There is no
+ * reply to read, so the adapter never sees the call.
+ */
+export const toolUseFailed = (failedGeneration = '<function=edit_file>{"path": "public/index.html", "old_text": "<h1>') =>
+  apiError(400, 'Failed to parse tool call arguments as JSON', { code: 'tool_use_failed', type: 'invalid_request_error', failedGeneration });
 
 /**
  * @param {{ apiKey?: string|null, script?: any, basePath?: string }} [o]

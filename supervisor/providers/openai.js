@@ -182,6 +182,19 @@ export class OpenAIProvider {
         throw new ProviderError('The AI provider could not find that model or address (HTTP 404). Check AI_MODEL and AI_BASE_URL in the .env file.');
       }
       const error = this.#errorOf(text);
+      // Groq (and some others) validate the model's tool-call arguments themselves. When the MODEL wrote
+      // invalid JSON they answer 400 "tool_use_failed" instead of a reply, so there is nothing to read.
+      // That is the model's slip, not a bad request: report it as a reply with no tool call, so the agent
+      // loop tells the model and lets it try again. (The tokens were spent, so the cost is estimated.)
+      if (status === 400 && (error.code === 'tool_use_failed' || /failed to parse tool call arguments/i.test(error.message ?? ''))) {
+        return {
+          content: [{ type: 'text', text: 'My last tool call was not valid JSON, so it was not run. I will call the tool again with valid JSON arguments.' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: estimatedInputTokens, outputTokens: Math.min(estimateTokens(error.failed ?? ''), this.settings.maxTokens) },
+          estimated: true,
+          toolFormatFailure: true,
+        };
+      }
       if (status === 429) {
         if (error.code === 'insufficient_quota' || error.type === 'insufficient_quota') {
           throw new ProviderError('The AI account has no remaining credit or quota (HTTP 429). Check the plan and billing with your AI provider.');
@@ -206,7 +219,9 @@ export class OpenAIProvider {
     try {
       const e = JSON.parse(text)?.error;
       if (typeof e === 'string') return { message: e };
-      if (e && typeof e === 'object') return { message: typeof e.message === 'string' ? e.message : undefined, code: e.code, type: e.type };
+      if (e && typeof e === 'object') {
+        return { message: typeof e.message === 'string' ? e.message : undefined, code: e.code, type: e.type, failed: typeof e.failed_generation === 'string' ? e.failed_generation : undefined };
+      }
     } catch {
       /* not JSON: show nothing from it */
     }

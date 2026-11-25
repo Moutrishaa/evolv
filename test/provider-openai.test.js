@@ -7,7 +7,7 @@ import { OpenAIProvider } from '../supervisor/providers/openai.js';
 import { ProviderError } from '../supervisor/providers/anthropic.js';
 import { normalizeBaseUrl } from '../supervisor/providers/base-url.js';
 import { estimateTokens } from '../supervisor/budget.js';
-import { startFakeOpenAI, chatReply, call, apiError } from '../test-fixtures/fake-openai.js';
+import { startFakeOpenAI, chatReply, call, apiError, toolUseFailed } from '../test-fixtures/fake-openai.js';
 
 const KEY = 'sk-openai-test-secret-123';
 let fake;
@@ -572,4 +572,45 @@ test('normalizeBaseUrl: accepts the good, refuses the unsafe, never echoes crede
   }
   assert.throws(() => normalizeBaseUrl('https://user:topsecretpw@api.groq.com/v1'), (e) => /AI_BASE_URL/.test(e.message) && !/topsecretpw|user/.test(e.message));
   assert.throws(() => normalizeBaseUrl('https://api.groq.com/v1?key=sk-abc123'), (e) => !/sk-abc123/.test(e.message));
+});
+
+// ---------- the provider refusing the MODEL's own malformed tool call (Groq: 400 tool_use_failed) ----------
+const FAILED_TEXT = '<function=edit_file>{"path": "public/index.html", "old_text": "<h1>';
+
+test('a 400 "tool_use_failed" is a recoverable result, not an error: the loop can tell the model and carry on', async () => {
+  fresh([toolUseFailed(FAILED_TEXT)]);
+  const out = await ask(make());
+  assert.equal(fake.requests.length, 1, 'the adapter does not retry: the agent loop retries with a hint');
+  assert.deepEqual(out.content.map((b) => b.type), ['text']);
+  assert.match(out.content[0].text, /not valid JSON/i);
+  assert.match(out.content[0].text, /again/i);
+  assert.equal(out.stopReason, 'end_turn');
+  assert.equal(out.toolFormatFailure, true);
+  assert.equal(out.estimated, true);
+  // Real tokens were spent on the failed generation, so the cost is estimated, rounded up.
+  assert.equal(out.usage.inputTokens, estimateTokens(fake.requests[0].raw));
+  assert.equal(out.usage.outputTokens, estimateTokens(FAILED_TEXT));
+  assert.ok(!out.content[0].text.includes('<function='), 'the raw failed text is not echoed back to the model');
+});
+
+test('it is recognised by its message too, and without failed_generation the output cost is zero', async () => {
+  fresh([apiError(400, 'Failed to parse tool call arguments as JSON', { type: 'invalid_request_error' })]);
+  const out = await ask(make());
+  assert.equal(out.toolFormatFailure, true);
+  assert.equal(out.usage.outputTokens, 0);
+});
+
+test('a huge failed_generation is costed but capped, and never echoed or leaked', async () => {
+  fresh([toolUseFailed(`${KEY} ${'x'.repeat(400000)}`)]);
+  const out = await ask(make());
+  assert.ok(out.usage.outputTokens > 0 && out.usage.outputTokens <= 8192, `cost was ${out.usage.outputTokens}`);
+  assert.ok(!JSON.stringify(out).includes(KEY));
+});
+
+test('every other 400 is still a plain provider_error (only the tool-format failure is recoverable)', async () => {
+  for (const [message, code] of [["This model's maximum context length is 8192 tokens.", 'context_length_exceeded'], ['Invalid value for tools[0].function.parameters', 'invalid_request_error'], ['Failed to parse the request body', undefined]]) {
+    const err = await failure([apiError(400, message, { code })]);
+    assert.equal(err.code, 'provider_error', message);
+    assert.match(err.message, /HTTP 400/);
+  }
 });
