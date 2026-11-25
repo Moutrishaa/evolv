@@ -62,14 +62,6 @@ test('passes through upstream status codes', async () => {
   assert.equal((await request(url('/teapot'))).status, 418);
 });
 
-test('strips the Evolv session cookie but keeps the app\'s own cookies', async () => {
-  const res = await request(url('/x'), { headers: { Cookie: 'evolv_session=SECRET; theme=dark' } });
-  const j = JSON.parse(res.body);
-  assert.ok(!String(j.cookie).includes('evolv_session'));
-  assert.ok(!String(j.cookie).includes('SECRET'));
-  assert.equal(j.cookie, 'theme=dark');
-});
-
 test('returns a 502 page pointing at the recovery console when the app is down', async () => {
   await request(url('/__down'));
   const res = await request(url('/anything'));

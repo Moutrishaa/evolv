@@ -23,6 +23,7 @@ function attempt(name, fn) {
 
 const attacks = [
   attempt('read ../.env', () => fs.readFileSync(path.join(rootDir, '.env'), 'utf8')),
+  attempt('read state/console.key', () => fs.readFileSync(path.join(rootDir, 'state', 'console.key'), 'utf8')),
   attempt('read supervisor/ file', () => fs.readFileSync(path.join(rootDir, 'supervisor', 'secret.js'), 'utf8')),
   attempt('read Windows system path', () =>
     fs.readFileSync(process.platform === 'win32' ? 'C:\\Windows\\win.ini' : '/etc/passwd', 'utf8')),
@@ -43,19 +44,57 @@ const attacks = [
 const control = attempt('write inside data/ (control)', () =>
   fs.writeFileSync(path.join(dataDir, 'ok.txt'), 'allowed'));
 
-const report = {
-  attacks,
-  control,
-  envKeys: Object.keys(process.env).sort(),
-  envNonEmptyKeys: Object.keys(process.env).filter((k) => process.env[k] !== '').sort(),
-  aiKeyVisible: process.env.AI_API_KEY !== undefined,
-  permissionModelOn: Boolean(process.permission),
-};
+// Network attacks on the console port, made from inside the sandbox. The network is open
+// (--allow-net), so only the console's own authentication stands in the way.
+const target = JSON.parse(fs.readFileSync(path.join(appDir, 'target.json'), 'utf8'));
+const consoleOrigin = `http://127.0.0.1:${target.consolePort}`;
+
+function call(name, method, urlPath, headers = {}) {
+  return new Promise((resolve) => {
+    const req = http.request(
+      { host: '127.0.0.1', port: target.consolePort, method, path: urlPath, headers },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({ name, status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+      },
+    );
+    req.on('error', (err) => resolve({ name, status: 0, body: '', error: err.code }));
+    req.end(method === 'POST' ? '{}' : undefined);
+  });
+}
+
+const forged = { Origin: consoleOrigin };
+const netAttacks = Promise.all([
+  call('GET console shell', 'GET', '/'),
+  call('GET /api/status, no token', 'GET', '/api/status', forged),
+  call('POST /api/reset, forged Origin, no token', 'POST', '/api/reset', forged),
+  call('POST /api/versions/undo, forged Origin, no token', 'POST', '/api/versions/undo', forged),
+  call('POST /api/versions/1/restore, forged Origin, no token', 'POST', '/api/versions/1/restore', forged),
+  call('POST /api/reset, guessed bearer', 'POST', '/api/reset', { ...forged, Authorization: 'Bearer ' + '0'.repeat(64) }),
+  call('POST /api/reset, cookie only', 'POST', '/api/reset', { ...forged, Cookie: 'evolv_session=guess' }),
+]);
+
+let report;
+const ready = netAttacks.then((net) => {
+  report = {
+    attacks,
+    control,
+    net,
+    envKeys: Object.keys(process.env).sort(),
+    envNonEmptyKeys: Object.keys(process.env).filter((k) => process.env[k] !== '').sort(),
+    aiKeyVisible: process.env.AI_API_KEY !== undefined,
+    permissionModelOn: Boolean(process.permission),
+  };
+});
 
 http
-  .createServer((req, res) => {
+  .createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    if (req.url === '/report') return res.end(JSON.stringify(report));
+    if (req.url === '/report') {
+      await ready;
+      return res.end(JSON.stringify(report));
+    }
     res.end('{}');
   })
   .listen(Number(process.env.PORT), '127.0.0.1');

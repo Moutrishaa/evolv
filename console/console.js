@@ -1,9 +1,26 @@
 // Recovery console, B1: Status and Logs. Everything from the server is written with
 // textContent, never innerHTML, so log lines cannot inject markup.
-const API = '/_evolv/api';
+// The console key is the bearer token. It arrives once in the URL fragment (never sent to a
+// server), is kept in this origin's localStorage, and is sent only in the Authorization header.
+// No cookies are used, so no other page can make this console act.
+const API = '/api';
+const KEY_STORE = 'evolv_console_key';
+let memoryKey = null;
+const fromHash = /^#key=([0-9a-f]{64})$/.exec(location.hash);
+if (fromHash) {
+  memoryKey = fromHash[1];
+  try { localStorage.setItem(KEY_STORE, memoryKey); } catch { /* private mode: keep it in memory */ }
+  history.replaceState(null, '', location.pathname + location.search);
+}
+function currentKey() {
+  if (memoryKey) return memoryKey;
+  try { return localStorage.getItem(KEY_STORE); } catch { return null; }
+}
 const tabs = { status: document.getElementById('tab-status'), logs: document.getElementById('tab-logs') };
 const statusList = document.getElementById('status-list');
 const statusError = document.getElementById('status-error');
+const loginHelp = document.getElementById('login-help');
+const main = document.getElementById('main-content');
 const logView = document.getElementById('log-view');
 let active = 'status';
 
@@ -16,8 +33,13 @@ for (const button of document.querySelectorAll('nav button')) {
   });
 }
 
+class LoginNeeded extends Error {}
+
 async function getJson(path) {
-  const res = await fetch(API + path, { cache: 'no-store' });
+  const key = currentKey();
+  if (!key) throw new LoginNeeded();
+  const res = await fetch(API + path, { cache: 'no-store', headers: { Authorization: 'Bearer ' + key } });
+  if (res.status === 401) throw new LoginNeeded();
   if (!res.ok) throw new Error(`Request failed (${res.status})`);
   return res.json();
 }
@@ -54,7 +76,14 @@ async function refresh() {
       if (stick) logView.scrollTop = logView.scrollHeight;
     }
     statusError.hidden = true;
+    loginHelp.hidden = true;
+    main.hidden = false;
   } catch (err) {
+    if (err instanceof LoginNeeded) {
+      loginHelp.hidden = false;
+      main.hidden = true;
+      return;
+    }
     statusError.textContent = `Could not reach the supervisor: ${err.message}`;
     statusError.hidden = false;
   }

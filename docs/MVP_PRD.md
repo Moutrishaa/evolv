@@ -1,4 +1,6 @@
-# Evolv MVP: Product Requirements (v0.1)
+# Evolv MVP: Product Requirements (v0.2)
+
+> v0.2: console moved to its own origin (port 3002) with a bearer-token header and no cookies; app origin limited to submit, cancel and progress (SEC-9, SEC-12, SEC-13, sections 4, 10, 11, 13).
 
 Source: the full Evolv PRD v1.0 (docs/PRD.md). This file is the trimmed first build. If the two disagree, this file wins for the MVP. Anything not listed here is out of scope until the MVP is accepted.
 
@@ -9,14 +11,14 @@ A user types a request in a chat box. An AI (Claude) edits the app's own source 
 ## 2. Scope
 
 **In the MVP**
-- Supervisor on port 3000: router, reverse proxy, console, JSON API.
+- Supervisor with two origins (see section 4): the app origin on port 3000 (reverse proxy plus a tiny submit/cancel/progress API) and the console origin on port 3002 (recovery console plus the full JSON API).
 - App process on port 3001: sandboxed, AI-written, restarted on crash.
 - Seed app: a minimal home page, `/health`, and a chat widget.
 - Agent loop with 7 tools: list_files, read_file, search, write_file, edit_file, delete_file, finish.
 - Staging workspace (git worktree), verifier, version store (git), promote and discard.
 - Live progress over Server-Sent Events, and cancel.
 - Versions: list, diff, undo, restore, factory reset.
-- Console at `/_evolv`: Chat, History, Status, Logs, Danger zone.
+- Console on its own origin (`http://127.0.0.1:3002`): Chat, History, Status, Logs, Danger zone. Port 3000 `/_evolv` is only a pointer page to it.
 - Token ledger, total budget, per-change cap, "used / budget" display.
 - One provider: Anthropic Messages API.
 - Persistent `data/` folder that survives code changes.
@@ -40,27 +42,37 @@ A user types a request in a chat box. An AI (Claude) edits the app's own source 
 - Plain HTML, CSS and JS for the console and seed app. No build step, no framework.
 - Windows is the development machine. Use `path` utilities everywhere, never hard-code `/` or `\`, and test process kill and restart on Windows.
 
-## 4. Architecture (unchanged from the full PRD)
+## 4. Architecture (changed from the full PRD: two origins)
 
 ```
-Browser -> 127.0.0.1:3000 SUPERVISOR
-   /_evolv/*     -> console + API
-   everything else -> proxy -> 127.0.0.1:3001 APP (sandboxed)
+Browser (app pages)   -> 127.0.0.1:3000  SUPERVISOR, APP ORIGIN
+   /_evolv/api/changes...  -> submit, cancel, read progress ONLY
+   /_evolv                 -> pointer page linking to the console origin
+   everything else         -> proxy -> 127.0.0.1:3001 APP (sandboxed)
+
+Browser (console)     -> 127.0.0.1:3002  SUPERVISOR, CONSOLE ORIGIN
+   /                       -> console UI (public shell, holds no secret)
+   /api/*                  -> full API, bearer token + strict Origin required
+   never proxies to the app
+
 SUPERVISOR also holds: agent runner -> Anthropic API,
 workspace (staging) -> verifier -> version store (git), process manager
 ```
+
+Why two origins: app pages are AI-written and run in the browser. If the console lived on the same origin, app JavaScript could read console pages or call destructive routes with the browser's own credentials. A different port is a different origin, so the browser blocks that. Undo, restore, reset, history, status and logs are not served on port 3000 at all.
 
 Project layout:
 
 ```
 evolv/
   supervisor/  main.js agent.js tools.js workspace.js verify.js process.js versions.js budget.js
+               config.js proxy.js api.js auth.js console-link.js
                providers/anthropic.js
   console/     index.html console.js console.css
   seed/        server.js evolv.json public/
   test/
   app/         created at runtime, own git repo, git-ignored
-  state/       usage ledger and settings, git-ignored
+  state/       usage ledger, settings and console.key, git-ignored, unreadable by the app sandbox
   .env.example
 ```
 
@@ -141,16 +153,27 @@ System prompt must say: edit only what the request needs; the app contract (belo
 - SEC-6 Memory cap 256 MB (`--max-old-space-size`). CPU watchdog restarts the app if pinned at 100% for 30 seconds.
 - SEC-7 App and verifier ports bind to 127.0.0.1 only.
 - SEC-8 Supervisor binds to 127.0.0.1 only.
-- SEC-9 Every state-changing `/_evolv/*` request needs a session token (HttpOnly, SameSite=Strict cookie) and a matching Origin header.
+- SEC-9 Console authentication. No cookies anywhere. Every `/api/*` request on the console origin needs `Authorization: Bearer <console key>` and an Origin on the strict allow-list (`http://127.0.0.1:<console port>` or `http://localhost:<console port>`). Writes need the Origin header; reads may omit it but a present Origin must match. The key is 256 bits, stored in `state/console.key`, and is held only by the console page (arrives once in the URL fragment, kept in that origin's `localStorage`, sent only in the Authorization header). A custom header forces a CORS preflight, which the supervisor always refuses. Comparison is constant-time.
+- SEC-12 Origin separation. Undo, restore, reset, history, diff, status and logs are served only on the console origin. The app origin serves only: submit a change, cancel a change, and read a change's progress (GET). Those three routes are the complete table, and any other `/_evolv` path on the app port returns 404. Change ids are 128-bit random and unguessable, carry no secrets, and the progress stream carries none either.
+- SEC-13 Both origins check the Host header (DNS rebinding), refuse CORS preflights, and never send `Access-Control-*` headers. Console responses send `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `nosniff` and `Cross-Origin-Resource-Policy: same-origin`. A console lockout after failed logins is deliberately NOT implemented: the app process shares the loopback network and could use a lockout to disable the recovery console. The 256-bit key makes guessing infeasible instead.
 - SEC-10 Validate and size-limit all inputs.
 - SEC-11 The API key comes only from `.env`. Never logged, never sent to the browser, never in the agent's context.
-- Accepted risk: the sandbox does not block outbound network access. Document it.
+- Accepted risk: the sandbox does not block outbound network access. Node's `--allow-net` is all-or-nothing and is required for the app to listen on its port. Document it.
+- Accepted MVP risk: app code can still submit and cancel change requests. Any page or server code in the app can call the app-origin submit and cancel routes, because the chat widget is itself app code. It cannot undo, restore or reset, and is limited by the single-change-at-a-time rule, TOKEN_BUDGET and CHANGE_TOKEN_LIMIT. Review mode (approve before promote), currently cut, is the real mitigation. A per-origin submit rate limit may be added later.
+- Environment note (Windows): libuv copies 11 OS variables into every child process. The app is given them as empty strings, except `SYSTEMROOT`, which Node needs on Windows. No key or user value reaches the app.
 
-## 10. API (all under /_evolv/api, JSON)
+## 10. API (JSON)
 
-POST /changes, GET /changes/:id/events (SSE: step, tool, verify, done, failed), POST /changes/:id/cancel, GET /versions, GET /versions/:id/diff, POST /versions/undo, POST /versions/:id/restore, POST /reset, GET /status, GET /logs.
+**App origin, port 3000, under `/_evolv/api`. App pages may use only these three:**
+POST /changes, GET /changes/:id/events (SSE: step, tool, verify, done, failed), POST /changes/:id/cancel.
+Writes need the exact app Origin. `:id` must be a 22 to 64 character random id.
 
-Errors: `{ error: { code, message } }` with codes busy, budget_exhausted, invalid_request, verify_failed, agent_limit, provider_error, cancelled.
+**Console origin, port 3002, under `/api`. Bearer token and console Origin required on every call:**
+POST /changes, GET /changes/:id/events, POST /changes/:id/cancel, GET /versions, GET /versions/:id/diff, POST /versions/undo, POST /versions/:id/restore, POST /reset, GET /status, GET /logs.
+
+Unauthenticated: 401 `unauthorized`. Wrong Origin or Host: 403 `forbidden`.
+
+Errors: `{ error: { code, message } }` with codes busy, budget_exhausted, invalid_request, verify_failed, agent_limit, provider_error, cancelled, plus unauthorized, forbidden, not_found, internal_error.
 
 ## 11. Configuration (.env, never committed)
 
@@ -163,7 +186,10 @@ CHANGE_TOKEN_LIMIT=100000
 AGENT_MAX_STEPS=40
 VERIFY_TIMEOUT_MS=8000
 PORT=3000
+CONSOLE_PORT=3002
 ```
+
+`CONSOLE_PORT` defaults to `PORT+2`. It must differ from `PORT` and from the app port (`PORT+1`).
 
 ## 12. Build plan (one at a time; commit after each green step)
 
@@ -174,13 +200,14 @@ PORT=3000
 
 ## 13. Acceptance criteria
 
-1. Fresh clone, `.env`, one start command: seed app at http://localhost:3000 and version 1 in History.
+1. Fresh clone, `.env`, one start command: seed app at http://localhost:3000, and the recovery console on port 3002 opened with `npm run console`, showing version 1 in History.
 2. "Change the background to dark navy and the text to white" goes live within 30 seconds as version 2 with a correct diff.
 3. "Add a notes page where I can type and save notes" adds a route and page, writes to `data/`, and the notes survive a restart and a later change.
 4. A change whose code crashes on start (forced with the fake provider) is reported as failed and the live app keeps serving the previous version with no downtime.
 5. After a change that blanks the page but passes health checks, the console still works and Undo restores the previous look.
 6. Restore to version 1 works and `data/` is intact.
 7. Every sandbox test fails as expected: read `../.env`, write outside `data/`, spawn a process, call the API without a token.
+7a. Hostile-page test: from the app origin, calls to reset, undo and restore fail (404 on port 3000; 401 or 403 on port 3002), with or without the real token, and the handlers never run. The hostile app process cannot read `state/console.key` and cannot call the console API.
 8. With a tiny TOKEN_BUDGET, the next change is refused before any AI call and the UI says why.
 9. The automated test suite passes.
 

@@ -3,17 +3,43 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSandboxed, buildSandboxArgs, buildSandboxEnv, WINDOWS_LIBUV_VARS, WINDOWS_REQUIRED_VAR } from '../supervisor/process.js';
+import http from 'node:http';
+import { createConsoleApi } from '../supervisor/api.js';
+import { ensureConsoleKey } from '../supervisor/auth.js';
 import { makeSandboxFixture, getFreePort, request, waitFor } from '../test-fixtures/helpers.js';
 
 let fx;
 let child;
 let report;
 let stderr = '';
+let consoleServer;
+let consoleKey;
+const resetCalls = { n: 0 };
 const SECRET = 'sk-parent-process-secret';
 
 before(async () => {
   fx = makeSandboxFixture();
   const port = await getFreePort();
+
+  // A real console API in this process. The hostile app (inside the sandbox) will attack it.
+  consoleKey = ensureConsoleKey(path.join(fx.root, 'state'));
+  const consolePort = await getFreePort();
+  const api = createConsoleApi({
+    port: consolePort,
+    consoleDir: path.join(fx.root, 'console'),
+    key: consoleKey,
+    routes: {
+      'GET /status': () => ({ status: 200, body: {} }),
+      'POST /reset': () => (resetCalls.n++, { status: 200, body: {} }),
+      'POST /versions/undo': () => (resetCalls.n++, { status: 200, body: {} }),
+      'POST /versions/:id/restore': () => (resetCalls.n++, { status: 200, body: {} }),
+    },
+  });
+  fs.mkdirSync(path.join(fx.root, 'console'));
+  fs.writeFileSync(path.join(fx.root, 'console', 'index.html'), '<h1>console</h1>');
+  consoleServer = http.createServer((req, res) => api.handle(req, res));
+  await new Promise((r) => consoleServer.listen(consolePort, '127.0.0.1', r));
+  fs.writeFileSync(path.join(fx.appDir, 'target.json'), JSON.stringify({ consolePort }));
 
   // The parent holds a fake key. The launcher must keep it away from the app.
   process.env.AI_API_KEY = SECRET;
@@ -34,6 +60,7 @@ before(async () => {
 });
 
 after(async () => {
+  if (consoleServer) await new Promise((r) => consoleServer.close(r));
   if (child && child.exitCode === null) {
     child.kill();
     await new Promise((r) => child.once('exit', r));
@@ -64,6 +91,7 @@ test('control: the app CAN write inside data/', () => {
 });
 
 test('attack: read ../.env is blocked', () => assertBlocked('read ../.env'));
+test('attack: read state/console.key is blocked', () => assertBlocked('read state/console.key'));
 test('attack: read a file in supervisor/ is blocked', () => assertBlocked('read supervisor/ file'));
 test('attack: read a Windows system path is blocked', () => assertBlocked('read Windows system path'));
 test('attack: write outside data/ is blocked', () => {
@@ -120,4 +148,35 @@ test('buildSandboxEnv returns only PORT, DATA_DIR, NODE_ENV', () => {
   const env = buildSandboxEnv({ port: 3001, dataDir: 'x' });
   assert.deepEqual(Object.keys(env).sort(), ['DATA_DIR', 'NODE_ENV', 'PORT']);
   assert.equal(env.PORT, '3001');
+});
+
+// The hostile app can reach the console port over the network. Only authentication stops it.
+const net = (name) => {
+  const n = report.net.find((x) => x.name === name);
+  assert.ok(n, `net attack "${name}" missing`);
+  return n;
+};
+
+test('hostile app process: every unauthenticated call to the console port is refused (401)', () => {
+  for (const name of [
+    'GET /api/status, no token',
+    'POST /api/reset, forged Origin, no token',
+    'POST /api/versions/undo, forged Origin, no token',
+    'POST /api/versions/1/restore, forged Origin, no token',
+    'POST /api/reset, guessed bearer',
+    'POST /api/reset, cookie only',
+  ]) {
+    assert.equal(net(name).status, 401, name);
+  }
+});
+
+test('hostile app process: reset, undo and restore handlers never ran', () => {
+  assert.equal(resetCalls.n, 0);
+});
+
+test('hostile app process: the console shell it can fetch contains no key', () => {
+  const shell = net('GET console shell');
+  assert.equal(shell.status, 200);
+  assert.ok(!shell.body.includes(consoleKey));
+  assert.ok(!JSON.stringify(report).includes(consoleKey));
 });

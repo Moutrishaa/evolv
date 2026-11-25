@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Evolv recovery console</title>
-  <link rel="stylesheet" href="/_evolv/console.css">
+  <link rel="stylesheet" href="/console.css">
 </head>
 <body>
   <header>
@@ -17,7 +17,13 @@
     <button type="button" data-tab="logs" aria-selected="false">Logs</button>
   </nav>
 
-  <main>
+  <section id="login-help" hidden>
+    <h2>Sign in needed</h2>
+    <p>This browser has not been signed in to the recovery console yet.</p>
+    <p>In the Evolv folder, run <code>npm run console</code>. It opens a signed-in link, and this browser stays signed in afterwards.</p>
+  </section>
+
+  <main id="main-content">
     <section id="tab-status" aria-label="Status">
       <dl id="status-list"></dl>
       <p id="status-error" role="alert" hidden></p>
@@ -27,6 +33,6 @@
     </section>
   </main>
 
-  <script src="/_evolv/console.js"></script>
+  <script src="/console.js"></script>
 </body>
 </html>

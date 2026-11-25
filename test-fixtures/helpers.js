@@ -18,6 +18,14 @@ export async function getFreePort() {
   });
 }
 
+/** A free console port that does not collide with PORT or PORT+1 (the default app port). */
+export async function getConsolePortFor(port) {
+  for (;;) {
+    const p = await getFreePort();
+    if (p !== port && p !== port + 1) return p;
+  }
+}
+
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function waitFor(fn, { timeout = 10000, interval = 50, what = 'condition' } = {}) {

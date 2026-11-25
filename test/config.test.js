@@ -16,6 +16,14 @@ test('defaults match section 11 of the MVP PRD', () => {
   assert.equal(c.agentMaxSteps, 40);
   assert.equal(c.verifyTimeoutMs, 8000);
   assert.equal(c.port, 3000);
+  assert.equal(c.consolePort, 3002);
+});
+
+test('console port defaults to PORT+2 and can be set; it may not collide with the app ports', () => {
+  assert.equal(loadConfig({ envText: 'PORT=4000', env: {} }).consolePort, 4002);
+  assert.equal(loadConfig({ envText: 'CONSOLE_PORT=5555', env: {} }).consolePort, 5555);
+  assert.throws(() => loadConfig({ envText: 'CONSOLE_PORT=3000', env: {} }), /CONSOLE_PORT/);
+  assert.throws(() => loadConfig({ envText: 'CONSOLE_PORT=3001', env: {} }), /CONSOLE_PORT/);
 });
 
 test('values come from .env text, and real environment variables override', () => {

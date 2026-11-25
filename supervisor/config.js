@@ -12,6 +12,7 @@ import fs from 'node:fs';
  * @property {number} agentMaxSteps
  * @property {number} verifyTimeoutMs
  * @property {number} port
+ * @property {number} consolePort  recovery console, its own origin
  * @property {string} apiKey  non-enumerable
  */
 
@@ -49,13 +50,19 @@ export function loadConfig({ envPath, envText, env = process.env } = {}) {
   if (envText === undefined && envPath && fs.existsSync(envPath)) text = fs.readFileSync(envPath, 'utf8');
   const file = parseEnv(text);
   // Real environment variables win over the file, but only for keys we know.
-  const known = ['AI_PROVIDER', 'AI_API_KEY', 'AI_MODEL', 'TOKEN_BUDGET', 'CHANGE_TOKEN_LIMIT', 'AGENT_MAX_STEPS', 'VERIFY_TIMEOUT_MS', 'PORT'];
+  const known = ['AI_PROVIDER', 'AI_API_KEY', 'AI_MODEL', 'TOKEN_BUDGET', 'CHANGE_TOKEN_LIMIT', 'AGENT_MAX_STEPS', 'VERIFY_TIMEOUT_MS', 'PORT', 'CONSOLE_PORT'];
   /** @type {Record<string,string>} */
   const src = { ...file };
   for (const k of known) if (env[k] !== undefined) src[k] = /** @type {string} */ (env[k]);
 
   const provider = src.AI_PROVIDER || 'anthropic';
   if (provider !== 'anthropic') throw new Error(`AI_PROVIDER must be "anthropic" in the MVP (got "${provider}")`);
+
+  const port = positiveInt(src, 'PORT', 3000);
+  const consolePort = positiveInt(src, 'CONSOLE_PORT', port + 2);
+  if (consolePort === port || consolePort === port + 1) {
+    throw new Error(`CONSOLE_PORT (${consolePort}) must differ from PORT (${port}) and the app port (${port + 1})`);
+  }
 
   const config = {
     provider: /** @type {'anthropic'} */ (provider),
@@ -64,7 +71,8 @@ export function loadConfig({ envPath, envText, env = process.env } = {}) {
     changeTokenLimit: positiveInt(src, 'CHANGE_TOKEN_LIMIT', 100000),
     agentMaxSteps: positiveInt(src, 'AGENT_MAX_STEPS', 40),
     verifyTimeoutMs: positiveInt(src, 'VERIFY_TIMEOUT_MS', 8000),
-    port: positiveInt(src, 'PORT', 3000),
+    port,
+    consolePort,
   };
   Object.defineProperty(config, 'apiKey', { value: src.AI_API_KEY || '', enumerable: false });
   return /** @type {Config} */ (config);
