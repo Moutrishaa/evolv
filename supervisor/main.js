@@ -6,7 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { AppProcess } from './process.js';
-import { ensureSeeded, listVersions } from './versions.js';
+import { ensureSeeded, listVersions, promote } from './versions.js';
 import { createProxy } from './proxy.js';
 import { createConsoleApi, createAppApi, createFrontHandler } from './api.js';
 import { ensureConsoleKey } from './auth.js';
@@ -14,12 +14,16 @@ import { Ledger } from './budget.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { ChangeRunner } from './changes.js';
 import { sweepWorkspaces } from './workspace.js';
+import { verifyWorkspace, createAppControl } from './verify.js';
+import { EventHub } from './events.js';
+import { createChangeRoutes } from './change-routes.js';
 
 /**
- * @param {{ config: import('./config.js').Config, root: string, appPort?: number, aiBaseUrl?: string }} o
- *   aiBaseUrl is a code-level test seam (the fake provider). It is never read from .env or the environment.
+ * @param {{ config: import('./config.js').Config, root: string, appPort?: number, aiBaseUrl?: string, verifySettleMs?: number }} o
+ *   aiBaseUrl and verifySettleMs are code-level test seams (the fake provider, a shorter settle).
+ *   They are never read from .env or the environment.
  */
-export async function startSupervisor({ config, root, appPort = config.port + 1, aiBaseUrl }) {
+export async function startSupervisor({ config, root, appPort = config.port + 1, aiBaseUrl, verifySettleMs = 2000 }) {
   const appDir = path.join(root, 'app');
   const dataDir = path.join(appDir, 'data');
   const stateDir = path.join(root, 'state'); // outside app/: the sandbox cannot read it
@@ -33,10 +37,27 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
   // the ledger reports the problem and blocks changes instead.
   const ledger = new Ledger({ file: path.join(stateDir, 'usage.json'), totalBudget: config.tokenBudget, changeLimit: config.changeTokenLimit });
   const provider = new AnthropicProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl });
-  const changes = new ChangeRunner({ appDir, workspacesDir, provider, ledger, maxSteps: config.agentMaxSteps, timeoutMs: 5 * 60 * 1000 });
 
   const app = new AppProcess({ appDir, dataDir, port: appPort });
   const proxy = createProxy({ getPort: () => appPort });
+  const control = createAppControl({ proc: app, port: appPort });
+
+  // Progress events for the widget and the console. Real paths are scrubbed from everything it sends.
+  const hub = new EventHub({ scrubPaths: [root, appDir, stateDir, workspacesDir] });
+  const changes = new ChangeRunner({
+    appDir,
+    workspacesDir,
+    provider,
+    ledger,
+    maxSteps: config.agentMaxSteps,
+    timeoutMs: 5 * 60 * 1000,
+    onEvent: (e) => hub.publish(/** @type {any} */ (e)),
+    log: (line) => app.logs.push(line),
+    verify: (ws, opts) => verifyWorkspace({ dir: ws.dir, timeoutMs: config.verifyTimeoutMs, settleMs: verifySettleMs, consolePort: config.consolePort, ...opts }),
+    promote: (args) => promote({ appDir, app: control, healthTimeoutMs: Math.max(config.verifyTimeoutMs, 10_000), ...args }),
+  });
+  // The same three routes on both origins: submit, cancel, progress. App pages get nothing else.
+  const changeRoutes = createChangeRoutes({ runner: changes, hub });
 
   const consoleApi = createConsoleApi({
     port: config.consolePort,
@@ -52,16 +73,18 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
             app: { ...st, uptimeMs: st.state === 'running' && st.startedAt ? Date.now() - st.startedAt : 0 },
             version: { current: versions[0]?.id ?? null, count: versions.length },
             budget: ledger.snapshot(),
+            notice: changes.notice,
             node: process.version,
           },
         };
       },
       'GET /logs': () => ({ status: 200, body: { lines: app.logs.lines() } }),
+      ...changeRoutes,
     },
   });
 
-  // B2 registers submit, cancel and progress here. Nothing else may ever be added to this table.
-  const appApi = createAppApi({ port: config.port, consolePort: config.consolePort, routes: {} });
+  // Submit, cancel and progress. Nothing else may ever be added to this table.
+  const appApi = createAppApi({ port: config.port, consolePort: config.consolePort, routes: changeRoutes });
 
   const server = http.createServer(createFrontHandler({ appApi, proxy }));
   const consoleServer = http.createServer((req, res) => void consoleApi.handle(req, res));
@@ -83,6 +106,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
     consoleKey,
     changes,
     ledger,
+    hub,
     async close() {
       await app.stop();
       for (const srv of [server, consoleServer]) {

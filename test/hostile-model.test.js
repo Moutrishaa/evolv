@@ -126,6 +126,9 @@ test('a hostile model cannot read, write, edit or delete anything it should not'
     const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => before[k] !== after[k]);
     assert.deepEqual(changed, [], `files outside the workspace changed: ${changed.join(', ')}`);
     assert.equal(fs.readFileSync(path.join(app.appDir, '.git', 'config'), 'utf8'), gitConfig);
+    // The snapshot above skips .git/worktrees/ (git's own bookkeeping), so check it separately:
+    // it must hold exactly the one workspace this test created and nothing else.
+    assert.deepEqual(fs.readdirSync(path.join(app.appDir, '.git', 'worktrees')), [ws.id]);
     assert.equal((await gitOut(app.appDir, ['rev-parse', 'HEAD'])).trim(), head);
     assert.equal((await gitOut(app.appDir, ['status', '--porcelain'])).trim(), '');
     assert.equal(fs.existsSync(path.join(app.root, 'escape.txt')), false);

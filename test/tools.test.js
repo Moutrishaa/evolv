@@ -168,14 +168,22 @@ test('read_file rejects bad ranges, directories, binary and huge files', () => {
 });
 
 test('read_file cannot see protected files, and says only "not found"', () => {
-  for (const p of ['.env', '.git/config', '.git/HEAD', 'data/notes.json', 'node_modules/x/index.js', '../outside.txt', '/etc/passwd', 'C:\\Windows\\win.ini', '.GIT/config']) {
+  // Protected places must be indistinguishable from missing ones: the exact same message.
+  const protectedPaths = ['.env', '.env.local', '.git/config', '.git/HEAD', '.GIT/config', '.gitignore', 'data/notes.json', 'DATA/notes.json', 'node_modules/x/index.js'];
+  for (const p of protectedPaths) {
     const r = run('read_file', { path: p });
     assert.equal(r.ok, false, p);
     assert.ok(!r.content.includes('SECRET'), p);
-    assert.match(r.content, /not found|may not|absolute|forward slashes|colons/i, p);
+    assert.match(r.content, /^Error: Not found: /, `${p} must say exactly "Not found", got: ${r.content}`);
+    assert.equal(r.content.replace(p, 'X'), run('read_file', { path: 'zzz' }).content.replace('zzz', 'X'), `${p} must look exactly like a missing file`);
   }
-  // protected and truly-missing files look the same
-  assert.equal(run('read_file', { path: '.env' }).content.replace('.env', 'X'), run('read_file', { path: 'zzz' }).content.replace('zzz', 'X'));
+  // Malformed paths get the guard's own, more helpful, wording. They still never succeed or leak.
+  for (const p of ['../outside.txt', '/etc/passwd', 'C:\\Windows\\win.ini']) {
+    const r = run('read_file', { path: p });
+    assert.equal(r.ok, false, p);
+    assert.ok(!r.content.includes('SECRET') && !r.content.includes('OUTSIDE'), p);
+    assert.match(r.content, /may not|absolute|forward slashes|colons/i, p);
+  }
 });
 
 // ---------- search ----------

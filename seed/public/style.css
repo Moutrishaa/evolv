@@ -10,3 +10,6 @@ footer a { color: #555; font-size: 0.9rem; }
 #chat-panel textarea { width: 100%; box-sizing: border-box; font: inherit; }
 #chat-panel button { margin-top: 0.5rem; }
 #chat-log { margin: 0 0 0.75rem; color: #8a4b00; }
+#chat-output { margin: 0 0 0.75rem; max-height: 10rem; overflow: auto; padding: 0.5rem; background: #f4f4f4; border: 1px solid #ddd; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+#chat-output[hidden], #chat-cancel[hidden] { display: none; }
+#chat-panel button:disabled { opacity: 0.6; cursor: not-allowed; }

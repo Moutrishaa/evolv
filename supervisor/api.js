@@ -53,7 +53,7 @@ export function isConsolePath(rawUrl) {
 
 /**
  * @typedef {{ status: number, body: unknown }} RouteResult
- * @typedef {(req: import('node:http').IncomingMessage, ctx: { params: Record<string,string> }) => RouteResult | Promise<RouteResult>} Handler
+ * @typedef {(req: import('node:http').IncomingMessage, ctx: { params: Record<string,string>, readJson: () => Promise<unknown> }) => any} Handler
  * @typedef {Record<string, Handler>} Routes   keyed "METHOD /path", with ":name" segments
  */
 
@@ -90,6 +90,75 @@ function send(res, status, headers, body) {
 const sendJson = (res, status, body) => send(res, status, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(body));
 /** @param {import('node:http').ServerResponse} res @param {number} status @param {string} code @param {string} message */
 const fail = (res, status, code, message) => sendJson(res, status, { error: { code, message } });
+
+/** An error a route handler may throw to answer with a specific status. Its message is safe to show. */
+export class ApiError extends Error {
+  /** @param {number} httpStatus @param {string} code @param {string} message */
+  constructor(httpStatus, code, message) {
+    super(message);
+    this.name = 'ApiError';
+    this.httpStatus = httpStatus;
+    this.code = code;
+    this.expose = true;
+  }
+}
+
+const MAX_BODY_BYTES = 16 * 1024;
+
+/**
+ * Reads a small JSON body. Only application/json is accepted, so a plain HTML form on another
+ * site cannot post to us, and nothing over 16 KB is ever read into memory.
+ * @param {import('node:http').IncomingMessage} req
+ */
+export function readJsonBody(req, limit = MAX_BODY_BYTES) {
+  return new Promise((resolve, reject) => {
+    if (!/^application\/json\s*(;.*)?$/i.test(String(req.headers['content-type'] ?? ''))) {
+      return reject(new ApiError(415, 'invalid_request', 'Send the request as JSON (Content-Type: application/json).'));
+    }
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limit) return reject(new ApiError(413, 'invalid_request', 'The request is too large.'));
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        chunks.length = 0;
+        return reject(new ApiError(413, 'invalid_request', 'The request is too large.'));
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch {
+        reject(new ApiError(400, 'invalid_request', 'The request body is not valid JSON.'));
+      }
+    });
+    req.on('error', () => reject(new ApiError(400, 'invalid_request', 'The request could not be read.')));
+  });
+}
+
+/**
+ * Sends a route's result. A result with `stream` becomes a Server-Sent Events response.
+ * @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res
+ * @param {{ status: number, body?: unknown, stream?: (res: import('node:http').ServerResponse, req: import('node:http').IncomingMessage) => void }} result
+ */
+function respond(req, res, result) {
+  if (!result.stream) return sendJson(res, result.status, result.body);
+  req.socket.setTimeout(0);
+  req.socket.setNoDelay(true);
+  res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/event-stream; charset=utf-8', 'X-Accel-Buffering': 'no', Connection: 'keep-alive' });
+  res.flushHeaders();
+  result.stream(res, req);
+}
+
+/** Errors that carry `expose` have messages written for users; anything else is a plain 500. @param {unknown} err @param {import('node:http').ServerResponse} res */
+function failFrom(err, res) {
+  const e = /** @type {any} */ (err);
+  if (res.headersSent) return void res.destroy();
+  if (e && e.expose === true) return fail(res, e.httpStatus ?? 500, e.code ?? 'internal_error', e.message);
+  fail(res, 500, 'internal_error', 'Something went wrong in the supervisor.');
+}
 
 /** @param {number} port */
 const hostsFor = (port) => new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
@@ -139,8 +208,8 @@ export function createConsoleApi({ port, consoleDir, key, routes }) {
           if (!originAllowed(req, origins)) return fail(res, 403, 'forbidden', 'Origin not allowed.');
           const hit = matchRoute(routes, method, pathname.slice('/api'.length), PARAM_RE);
           if (!hit) return fail(res, 404, 'not_found', 'No such API route.');
-          const result = await hit.handler(req, { params: hit.params });
-          return sendJson(res, result.status, result.body);
+          const result = await hit.handler(req, { params: hit.params, readJson: () => readJsonBody(req) });
+          return respond(req, res, result);
         }
 
         if (!SAFE_METHODS.has(method)) return fail(res, 404, 'not_found', 'Not found.');
@@ -149,9 +218,8 @@ export function createConsoleApi({ port, consoleDir, key, routes }) {
         if (!entry) return fail(res, 404, 'not_found', 'Not found.');
         const body = fs.readFileSync(path.join(consoleDir, entry[0]));
         return send(res, 200, { 'Content-Type': entry[1] }, method === 'HEAD' ? undefined : body);
-      } catch {
-        if (!res.headersSent) fail(res, 500, 'internal_error', 'Something went wrong in the supervisor.');
-        else res.destroy();
+      } catch (err) {
+        failFrom(err, res);
       }
     },
   };
@@ -193,13 +261,12 @@ export function createAppApi({ port, consolePort, routes }) {
           const rel = decodePath(raw.slice('/_evolv/api'.length));
           const hit = rel === null ? null : matchRoute(routes, method, rel, APP_ID_RE);
           if (!hit) return fail(res, 404, 'not_found', 'No such API route.');
-          const result = await hit.handler(req, { params: hit.params });
-          return sendJson(res, result.status, result.body);
+          const result = await hit.handler(req, { params: hit.params, readJson: () => readJsonBody(req) });
+          return respond(req, res, result);
         }
         return fail(res, 404, 'not_found', 'Not found.');
-      } catch {
-        if (!res.headersSent) fail(res, 500, 'internal_error', 'Something went wrong in the supervisor.');
-        else res.destroy();
+      } catch (err) {
+        failFrom(err, res);
       }
     },
   };

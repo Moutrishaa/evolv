@@ -28,11 +28,14 @@ export async function createWorkspace({ appDir, workspacesDir, id }) {
   fs.mkdirSync(workspacesDir, { recursive: true });
   const dir = path.join(workspacesDir, id);
   // From the saved version (HEAD), so uncommitted edits and data/ never come along.
+  const base = (await git(appDir, ['rev-parse', 'HEAD'])).trim();
   await git(appDir, ['worktree', 'add', '--detach', '--quiet', dir, 'HEAD']);
 
   return {
     id,
     dir,
+    /** The version this workspace was staged from. */
+    base,
 
     /** @returns {Promise<{ path: string, status: 'added'|'modified'|'deleted' }[]>} */
     async changedFiles() {
@@ -55,6 +58,24 @@ export async function createWorkspace({ appDir, workspacesDir, id }) {
     async diff() {
       await git(dir, ['add', '-A']); // stages inside this worktree's own index only
       return git(dir, ['diff', '--cached', '--no-color', '--no-ext-diff', '--no-renames', 'HEAD']);
+    },
+
+    /**
+     * Saves the staged changes as a new commit on top of `base` and returns its hash.
+     * The message goes through a file (-F) and is kept verbatim. data/ is git-ignored, so it is never included.
+     * Nothing outside this worktree moves: the live app only changes when promote() fast-forwards it.
+     */
+    async commit(message) {
+      await git(dir, ['add', '-A']);
+      if (!(await git(dir, ['diff', '--cached', '--name-only'])).trim()) throw new Error('Nothing to commit.');
+      const messageFile = path.join(workspacesDir, `${id}.commitmsg`);
+      fs.writeFileSync(messageFile, message, 'utf8');
+      try {
+        await git(dir, ['commit', '--quiet', '--no-verify', '--cleanup=verbatim', '-F', messageFile]);
+      } finally {
+        fs.rmSync(messageFile, { force: true });
+      }
+      return (await git(dir, ['rev-parse', 'HEAD'])).trim();
     },
 
     /** Removes the workspace and its git record. Safe to call twice. */

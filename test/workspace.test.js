@@ -130,3 +130,54 @@ test('sweepWorkspaces is fine when there is nothing to sweep', async () => {
   fs.rmSync(app.workspacesDir, { recursive: true });
   await assert.doesNotReject(() => sweepWorkspaces({ appDir: app.appDir, workspacesDir: app.workspacesDir }));
 });
+
+// ---------- B3: base and commit ----------
+test('a workspace remembers the version it was staged from', async () => {
+  const ws = await open();
+  assert.equal(ws.base, await liveHead());
+  await ws.discard();
+});
+
+test('commit saves the changes as a new commit on top of the base, and leaves the live app alone', async () => {
+  const base = await liveHead();
+  const ws = await open();
+  fs.writeFileSync(path.join(ws.dir, 'public', 'style.css'), 'body { background: navy; }\n');
+  fs.writeFileSync(path.join(ws.dir, 'new-page.html'), '<h1>New</h1>\n');
+  const hash = await ws.commit('Made it navy\n\nEvolv-Meta: {"tokens":1}');
+  assert.match(hash, /^[0-9a-f]{40}$/);
+  assert.notEqual(hash, base);
+  assert.equal((await gitOut(app.appDir, ['rev-parse', `${hash}^`])).trim(), base, 'the parent is the version it was staged from');
+  const files = (await gitOut(app.appDir, ['show', '--name-only', '--format=', hash])).trim().split('\n').sort();
+  assert.deepEqual(files, ['new-page.html', 'public/style.css']);
+  assert.equal(await liveHead(), base, 'committing in the workspace does not move the live app');
+  assert.equal(await liveStatus(), '');
+  await ws.discard();
+});
+
+test('commit keeps the message exactly, including newlines, quotes, unicode and long text', async () => {
+  const ws = await open();
+  fs.writeFileSync(path.join(ws.dir, 'a.txt'), 'x');
+  const message = `Subject line\n\nBody with "quotes", 'single', back\slash, $dollar, ☃ snowman\n${'long '.repeat(3000)}\nEvolv-Meta: {"a":1}`;
+  const hash = await ws.commit(message);
+  const stored = await gitOut(app.appDir, ['log', '-1', '--format=%B', hash]);
+  assert.equal(stored.trim(), message.trim());
+  await ws.discard();
+});
+
+test('commit refuses when there is nothing to commit, and never commits data/', async () => {
+  const ws = await open();
+  await assert.rejects(() => ws.commit('empty'), /nothing to commit/i);
+  fs.mkdirSync(path.join(ws.dir, 'data'), { recursive: true });
+  fs.writeFileSync(path.join(ws.dir, 'data', 'leftover.json'), '{}');
+  await assert.rejects(() => ws.commit('only data'), /nothing to commit/i, 'data/ is ignored, so there is still nothing');
+  await ws.discard();
+});
+
+test('commit leaves no temporary files behind', async () => {
+  const ws = await open();
+  fs.writeFileSync(path.join(ws.dir, 'a.txt'), 'x');
+  await ws.commit('hello');
+  assert.deepEqual(fs.readdirSync(app.workspacesDir), [ws.id]);
+  await ws.discard();
+  assert.deepEqual(fs.readdirSync(app.workspacesDir), []);
+});

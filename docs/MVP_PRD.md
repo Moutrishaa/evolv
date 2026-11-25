@@ -82,12 +82,15 @@ evolv/
 1. **Admit:** valid request (1 to 4,000 chars), no other change running, budget left. Otherwise refuse (busy = 409, budget = 429).
 2. **Stage:** fresh git worktree from the current version.
 3. **Agent edits:** tool loop in the workspace only. Limits: 40 steps, CHANGE_TOKEN_LIMIT tokens, 5 minutes.
-4. **Verify:** start the staged app on a spare port with the same sandbox. Pass only if all hold:
-   - GET /health returns 200 within VERIFY_TIMEOUT_MS.
+4. **Verify:** start the staged app on a spare loopback port with the same sandbox and a **fresh, empty `data/`** (verification never sees real data, and its `data/` is discarded with the workspace). Pass only if all hold:
+   - `server.js` exists and `evolv.json` is valid (checked before anything is started). Smoke routes must each start with a single `/`, contain no spaces, backslashes or control characters, be at most 200 characters, and number at most 50. A route can never make the verifier call another host.
+   - GET /health returns 200 within VERIFY_TIMEOUT_MS. An app that exits right after starting fails at once.
    - GET / returns 200 and HTML.
-   - Every route in `app/evolv.json` smoke list returns below 500.
-   - The process is still alive after a 2 second settle.
-5. **Promote:** commit as a new version, swap the live app, tell the browser to reload.
+   - **Recovery link (addition to the original four checks):** the home page contains a real link (an `<a href>`, not a comment, script or text) to the recovery console at the correct address: `/_evolv`, or exactly `http://127.0.0.1:CONSOLE_PORT/` or `http://localhost:CONSOLE_PORT/`. `/_evolv` is the stable address: the supervisor serves a pointer page there that links to the configured console origin. A change cannot remove or redirect the user's only way back.
+   - Every route in `app/evolv.json` smoke list returns below 500 (a 404 is fine).
+   - The process is still alive, and still answers /health, after a 2 second settle.
+   The result is a pass or a failure with a plain-language reason, the per-check results, and the app's own output (colour codes and control characters removed, real paths replaced, capped at about 4,000 characters).
+5. **Promote:** commit as a new version, swap the live app, tell the browser to reload. Precisely: refuse, touching nothing, if the live files were edited outside Evolv or the live version moved on since staging; commit in the workspace; stop the live app; fast-forward `app/` to the commit; start it; wait for /health. `data/` is never touched. Once promotion begins it cannot be cancelled (`too_late`). If the new version does not become healthy, it is rolled back automatically (see M-R3).
 
 Any failure or cancel discards the workspace. The live app is untouched. No repair attempt in the MVP.
 
@@ -102,7 +105,7 @@ Any failure or cancel discards the workspace. The live app is untouched. No repa
 - M-C6 On failure show a plain-language reason, the verifier output, and that the app is unchanged.
 
 **Versions**
-- M-V1 Each accepted change is a version: id, time, request, summary, changed files, token cost.
+- M-V1 Each accepted change is a version: id, time, request, summary, changed files, token cost. Stored in the version's git commit message as a single `Evolv-Meta: {json}` line (the summary is forced onto one line and the request is JSON-escaped, so neither can forge another metadata line).
 - M-V2 Undo creates a new version equal to the one before the latest. History is never rewritten.
 - M-V3 Restore creates a new version equal to any earlier one.
 - M-V4 Undo and restore go through verification. If the target does not start, keep the live app and say so.
@@ -113,6 +116,7 @@ Any failure or cancel discards the workspace. The live app is untouched. No repa
 - M-R1 First start creates the app from the seed and records version 1.
 - M-R2 `data/` is the only place the app writes. It is not versioned and survives everything except an opted-in wipe.
 - M-R3 Crash restart with backoff. After 3 crashes in 60 seconds, stop and let the console offer Undo and Restore.
+  - **Addition (B3): automatic rollback of a failed promotion.** If a version that passed verification does not become healthy after the swap (for example it cannot cope with the live `data/`, which verification does not see), Evolv rolls back automatically: it stops the app, moves the branch back to the previous version, and starts that version again. That version never appears in History, because it never became a working version; this is the only place the version branch moves backward. `data/` is untouched. The change fails with code `swap_failed`, and the user is told in plain words (for example "The new version did not start properly, so Evolv put your previous version (version 1) back. Nothing was lost.") in the chat widget, in the console Status page as a Notice (kept until the next change succeeds), and in the Logs. If even the restored version cannot be confirmed healthy, the message says so and points to the recovery console.
 - M-R4 Keep the last 500 log lines, viewable in the console.
 
 **Usage**
@@ -172,15 +176,20 @@ System prompt must say: edit only what the request needs; the app contract (belo
 ## 10. API (JSON)
 
 **App origin, port 3000, under `/_evolv/api`. App pages may use only these three:**
-POST /changes, GET /changes/:id/events (SSE: step, tool, verify, done, failed), POST /changes/:id/cancel.
+POST /changes, GET /changes/:id/events (SSE: accepted, staged, step, tool, verify, promoting, done, failed), POST /changes/:id/cancel.
 Writes need the exact app Origin. `:id` must be a 22 to 64 character random id.
+
+- `POST /changes` takes `Content-Type: application/json` and `{"request": "..."}` (1 to 4,000 characters, bodies over 16 KB refused). It answers `202 {"id"}` after admission checks (validation, one change at a time, budget, usable ledger, API key) and before any staging or AI call. The first event (`accepted`) exists before the id is returned, so a client can subscribe immediately.
+- `POST /changes/:id/cancel` answers 200 `{"cancelled":true}`, 404 for an unknown or finished change, or 409 `too_late` once promotion has begun.
+- `GET /changes/:id/events` is a Server-Sent Events stream: numbered events (`Last-Event-ID` resumes), a heartbeat comment every 15 seconds, closed after `done` or `failed`. It carries no secrets and no file contents. Verifier output appears only on `failed`, with real paths replaced by `<app>`, control characters removed and size capped. Limits, because app pages are untrusted: at most 5 streams per change and 20 in total (429 `rate_limited`); only the last 5 finished changes are kept, for 15 minutes; at most 500 events per change; a client that stops reading is disconnected. After a supervisor restart the history is gone (404), and the widget says the connection was lost.
+- `done` carries `{version, summary, files, tokens, steps}` and is announced only after the runner is free and the workspace is gone, so the widget may start another change right after reloading. `failed` carries `{code, message, output?, checks?}`; every failure message says the app was not changed, or that the previous version was put back.
 
 **Console origin, port 3002, under `/api`. Bearer token and console Origin required on every call:**
 POST /changes, GET /changes/:id/events, POST /changes/:id/cancel, GET /versions, GET /versions/:id/diff, POST /versions/undo, POST /versions/:id/restore, POST /reset, GET /status, GET /logs.
 
 Unauthenticated: 401 `unauthorized`. Wrong Origin or Host: 403 `forbidden`.
 
-Errors: `{ error: { code, message } }` with codes busy, budget_exhausted, invalid_request, verify_failed, agent_limit, provider_error, cancelled, plus unauthorized, forbidden, not_found, internal_error, and ledger_unreadable (503, a damaged usage file).
+Errors: `{ error: { code, message } }` with codes busy, budget_exhausted, invalid_request, verify_failed, agent_limit, provider_error, cancelled, plus unauthorized, forbidden, not_found, internal_error, ledger_unreadable (503, a damaged usage file), swap_failed (500, a promoted version did not become healthy and was rolled back), no_changes (422, the agent finished without changing anything), too_late (409, cancel after promotion began) and rate_limited (429, too many progress streams). `verify_failed` is 422; `busy` and `cancelled` are 409.
 
 ## 11. Configuration (.env, never committed)
 
@@ -202,7 +211,7 @@ CONSOLE_PORT=3002
 
 - **B1 Foundation:** supervisor start-up, seed, version 1, sandboxed app process, proxy, console Status and Logs. Sandbox tests (hostile app) pass.
 - **B2 Agent:** path guard and tools with unit tests, workspace staging, budget ledger, fake provider, Anthropic adapter, tool loop. A fake-provider change succeeds end to end. Until B3 there is no verify or promote: a finished change reports its summary, changed files, diff and token cost, then the staging copy is discarded and the live app is untouched. No HTTP routes and no chat-widget wiring yet; both arrive in B3.
-- **B3 Safe promotion:** verifier, promote and discard, SSE progress, cancel.
+- **B3 Safe promotion:** verifier, promote and discard, SSE progress, cancel, and the chat widget connected to POST /changes. The widget only appears in a freshly seeded `app/`; an existing `app/` keeps the widget it was seeded with.
 - **B4 History:** undo, restore, reset, diff, console History and Chat pages.
 
 ## 13. Acceptance criteria

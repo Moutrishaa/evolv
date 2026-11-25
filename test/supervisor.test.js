@@ -34,7 +34,7 @@ before(async () => {
     ],
   });
   // aiBaseUrl is a code-level test seam, never an environment or .env setting.
-  sup = await startSupervisor({ config, root: tmp.dir, appPort, aiBaseUrl: fake.url });
+  sup = await startSupervisor({ config, root: tmp.dir, appPort, aiBaseUrl: fake.url, verifySettleMs: 200 });
   base = `http://127.0.0.1:${port}`;
   cbase = `http://127.0.0.1:${consolePort}`;
   auth = { Authorization: `Bearer ${sup.consoleKey}` };
@@ -155,12 +155,14 @@ test('a change runs through the supervisor with the fake provider, and Status sh
   const result = await done;
   assert.equal(result.summary, 'Made the page navy.');
   assert.deepEqual(result.changedFiles, [{ path: 'public/style.css', status: 'modified' }]);
+  assert.equal(result.version.id, 2, 'verified, so it went live as version 2');
 
   const after = JSON.parse((await request(`${cbase}/api/status`, { headers: auth })).body);
   assert.equal(after.budget.used, 450);
   assert.equal(after.budget.total, 300000);
   assert.equal(after.budget.problem ?? null, null);
-  // Nothing went live (that is B3): the live app is untouched and the staging copy is gone.
+  assert.equal(after.version.current, 2);
+  assert.match((await request(`${base}/style.css`)).body, /#000080/, 'the live app serves the new version');
   assert.equal((await gitOut(path.join(tmp.dir, 'app'), ['status', '--porcelain'])).trim(), '');
   assert.deepEqual(fs.readdirSync(path.join(tmp.dir, 'state', 'workspaces')), []);
 });

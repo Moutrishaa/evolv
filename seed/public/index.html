@@ -18,11 +18,13 @@
 
   <button id="chat-toggle" type="button" aria-expanded="false" aria-controls="chat-panel">Chat</button>
   <section id="chat-panel" hidden aria-label="Request a change">
-    <p id="chat-log" role="status"></p>
+    <p id="chat-log" role="status" aria-live="polite"></p>
+    <pre id="chat-output" hidden></pre>
     <form id="chat-form">
       <label for="chat-input">What would you like to change?</label>
       <textarea id="chat-input" rows="3" maxlength="4000" required></textarea>
-      <button type="submit">Send</button>
+      <button id="chat-send" type="submit">Send</button>
+      <button id="chat-cancel" type="button" hidden>Cancel</button>
     </form>
   </section>
 
