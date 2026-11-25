@@ -20,14 +20,14 @@ A user types a request in a chat box. An AI (Claude) edits the app's own source 
 - Versions: list, diff, undo, restore, factory reset.
 - Console on its own origin (`http://127.0.0.1:3002`): Chat, History, Status, Logs, Danger zone. Port 3000 `/_evolv` is only a pointer page to it.
 - Token ledger, total budget, per-change cap, "used / budget" display.
-- One provider: Anthropic Messages API.
+- Two providers: the Anthropic Messages API (default) and, added after B3, any OpenAI-compatible Chat Completions server (OpenAI, Groq, local servers) through `AI_PROVIDER=openai` and `AI_BASE_URL`. See section 16.
 - Persistent `data/` folder that survives code changes.
 
 **Cut from the MVP (build later)**
 - Review mode (approve before promote).
 - The automatic repair attempt after a failed verification.
 - Follow-up context (last 5 summaries sent to the agent).
-- The OpenAI-compatible adapter (Groq, Gemini, local models).
+- ~~The OpenAI-compatible adapter (Groq, Gemini, local models).~~ Built after B3: see section 16. Gemini's compatibility endpoint is untested.
 - The accessibility pass.
 - Request-wait during version swap (a brief error during the swap is acceptable).
 - Packaging and docs polish.
@@ -168,7 +168,7 @@ System prompt must say: edit only what the request needs; the app contract (belo
 - SEC-12 Origin separation. Undo, restore, reset, history, diff, status and logs are served only on the console origin. The app origin serves only: submit a change, cancel a change, and read a change's progress (GET). Those three routes are the complete table, and any other `/_evolv` path on the app port returns 404. Change ids are 128-bit random and unguessable, carry no secrets, and the progress stream carries none either.
 - SEC-13 Both origins check the Host header (DNS rebinding), refuse CORS preflights, and never send `Access-Control-*` headers. Console responses send `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `nosniff` and `Cross-Origin-Resource-Policy: same-origin`. A console lockout after failed logins is deliberately NOT implemented: the app process shares the loopback network and could use a lockout to disable the recovery console. The 256-bit key makes guessing infeasible instead.
 - SEC-10 Validate and size-limit all inputs.
-- SEC-11 The API key comes only from `.env`. Never logged, never sent to the browser, never in the agent's context.
+- SEC-11 The API key comes only from `.env`. Never logged, never sent to the browser, never in the agent's context. It is sent only to the configured AI address (see section 16 for how that address is constrained).
 - Accepted risk: the sandbox does not block outbound network access. Node's `--allow-net` is all-or-nothing and is required for the app to listen on its port. Document it.
 - Accepted MVP risk: app code can still submit and cancel change requests. Any page or server code in the app can call the app-origin submit and cancel routes, because the chat widget is itself app code. It cannot undo, restore or reset, and is limited by the single-change-at-a-time rule, TOKEN_BUDGET and CHANGE_TOKEN_LIMIT. Review mode (approve before promote), currently cut, is the real mitigation. A per-origin submit rate limit may be added later.
 - Environment note (Windows): libuv copies 11 OS variables into every child process. The app is given them as empty strings, except `SYSTEMROOT`, which Node needs on Windows. No key or user value reaches the app.
@@ -243,3 +243,19 @@ CONSOLE_PORT=3002
 - **Isolation.** It uses its own `demo-data/` folder (git-ignored, safe to delete) for the app, state, console key and ledger, so the real `app/` and `state/` are never touched. It never builds the real provider, ignores any key in `.env` or the environment, and makes no network call.
 - **Loud banner.** A red "DEMO MODE" banner appears on the console page (before sign-in), on the `/_evolv` pointer page, in Status (`mode: "demo"`) and in the terminal, plus a `[DEMO]` title prefix. It is deliberately not placed in app pages, which the AI can edit.
 - **Scenarios,** chosen by a word in the request, checked in this order: `rollback`, `crash`, `nolink`, `slow`, `navy`, `page`; anything else gets a "nothing to apply" result. `navy` toggles the colours. `page` adds an About page. `crash` and `nolink` are rejected by the verifier. `rollback` passes verification and then fails on the demo's live `data/`, so it is rolled back. `slow` can be cancelled.
+
+## 16. OpenAI-compatible provider (added after B3)
+
+`AI_PROVIDER=openai` talks to any server that speaks OpenAI's Chat Completions API (`POST {AI_BASE_URL}/chat/completions`): OpenAI, Groq, and local servers such as Ollama. It has the same interface as the Anthropic adapter, so the agent loop, tools and every safety rule are unchanged.
+
+**Settings (`.env`).**
+- `AI_PROVIDER=openai`, `AI_MODEL` (required; the Claude default makes no sense here), `AI_API_KEY`.
+- `AI_BASE_URL` (optional; default `https://api.openai.com/v1`).
+
+**Where the key may go (this is why `AI_BASE_URL` is constrained).** `AI_BASE_URL` decides where the API key is sent. It is read only from `.env` (which the AI-written app and the agent can neither read nor write) and is validated at start-up and again by the adapter: `https` only, with `http` allowed only for `localhost`, `127.0.0.1` or `[::1]` (anywhere else it would send the key unencrypted); no login or password in the address; no `?` or `#` part; not the full `/chat/completions` address. A bad value is refused with a plain message that never echoes the value. `AI_BASE_URL` with `AI_PROVIDER=anthropic` is an error, so it can never redirect the Anthropic key. Redirects are never followed. The console Status page shows the provider, the model and the host requests go to (never the key), and the terminal prints the same line at start-up. This reverses the earlier rule that the base URL is code-only; `.env` is user-controlled, so it is accepted with these guards.
+
+**The key.** Optional only when the base URL is on this computer; otherwise a change is refused before anything is sent. It is held privately, sent only in the `Authorization` header, scrubbed from every error text, and never logged or sent to the browser.
+
+**Mapping.** Tool definitions become `{type:"function", function:{name, description, parameters}}`. `tool_calls[].function.arguments` arrives as a JSON string and is parsed. Arguments that cannot be read (malformed or cut-off JSON, not an object) do not stop the change: the call is returned with an `inputError`, the tool is NOT run, the model gets an error result explaining why, and the history sent back contains `{}` for that call so strict servers do not reject it. Each tool result is its own `tool` message, in order. Usage maps `prompt_tokens` to input and `completion_tokens` to output (cached tokens are already included, not added again); a reply with no usable usage is estimated, rounded up, and flagged. The output limit is sent as `max_tokens` (a constructor option can name it `max_completion_tokens` for models that require that).
+
+**Errors, all `provider_error`.** 401/403: the key was rejected. 404: check `AI_MODEL` and `AI_BASE_URL`. 429: retried twice (honouring `Retry-After` up to 10 seconds), then a plain message with a wait hint; a 429 for an account with no credit (`insufficient_quota`) is not retried. 5xx and network errors: retried twice. Other 4xx: the server's message with the key scrubbed. Redirects, HTML error pages, an empty `choices`, and a 200 carrying an error are each reported plainly.

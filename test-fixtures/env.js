@@ -6,6 +6,7 @@ import { startSupervisor } from '../supervisor/main.js';
 import { loadConfig } from '../supervisor/config.js';
 import { listVersions } from '../supervisor/versions.js';
 import { startFakeProvider, reply, toolUse } from './fake-provider.js';
+import { startFakeOpenAI, chatReply, call } from './fake-openai.js';
 import { makeTempDir, getFreePort, getConsolePortFor, request, waitFor, ROOT } from './helpers.js';
 import { readSse } from './net.js';
 
@@ -16,7 +17,13 @@ export const changeScript = (files, summary = 'Made the requested change.') => [
   reply([...Object.entries(files).map(([p, content]) => toolUse('write_file', { path: p, content })), toolUse('finish', { summary })]),
 ];
 
-export async function startEnv({ script = [], envText = '', settleMs = 200, tokenBudget, prepare } = {}) {
+/** The same one-step change, as an OpenAI-style reply (tool call arguments are JSON strings). */
+export const openaiChangeScript = (files, summary = 'Made the requested change.') => [
+  chatReply({ toolCalls: [...Object.entries(files).map(([p, content]) => call('write_file', { path: p, content })), call('finish', { summary })] }),
+];
+
+/** provider: 'anthropic' (default) or 'openai' (an OpenAI-compatible fake server under /v1). */
+export async function startEnv({ script = [], envText = '', settleMs = 200, tokenBudget, prepare, provider = 'anthropic' } = {}) {
   const tmp = makeTempDir('evolv-e2e-');
   fs.cpSync(path.join(ROOT, 'seed'), path.join(tmp.dir, 'seed'), { recursive: true });
   fs.cpSync(path.join(ROOT, 'console'), path.join(tmp.dir, 'console'), { recursive: true });
@@ -24,11 +31,11 @@ export async function startEnv({ script = [], envText = '', settleMs = 200, toke
   const consolePort = await getConsolePortFor(port);
   const appPort = await getFreePort();
   const config = loadConfig({
-    envText: `AI_API_KEY=${AI_KEY}\n${tokenBudget ? `TOKEN_BUDGET=${tokenBudget}\n` : ''}${envText}`,
+    envText: `AI_API_KEY=${AI_KEY}\n${provider === 'openai' ? 'AI_PROVIDER=openai\nAI_MODEL=test-model-x\n' : ''}${tokenBudget ? `TOKEN_BUDGET=${tokenBudget}\n` : ''}${envText}`,
     env: { PORT: String(port), CONSOLE_PORT: String(consolePort), VERIFY_TIMEOUT_MS: '4000' },
   });
   if (prepare) await prepare(tmp.dir); // e.g. damage a file before the supervisor starts
-  const fake = await startFakeProvider({ apiKey: AI_KEY, script });
+  const fake = provider === 'openai' ? await startFakeOpenAI({ apiKey: AI_KEY, basePath: '/v1', script }) : await startFakeProvider({ apiKey: AI_KEY, script });
   // aiBaseUrl and verifySettleMs are code-level test seams, never environment settings.
   const sup = await startSupervisor({ config, root: tmp.dir, appPort, aiBaseUrl: fake.url, verifySettleMs: settleMs });
   const base = `http://127.0.0.1:${port}`;

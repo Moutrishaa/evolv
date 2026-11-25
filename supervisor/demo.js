@@ -22,11 +22,13 @@ import { createDemoProvider, DEMO_BANNER, DEMO_PHRASES } from './demo-provider.j
  */
 export function loadDemoConfig({ envPath, envText, env = process.env } = {}) {
   const text = envText ?? (envPath && fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '');
-  const withoutKey = text
+  // Every AI setting is dropped, not just the key: demo never uses a real provider, so a real
+  // provider setup in .env (or a mistake in it) can neither reach demo mode nor stop it starting.
+  const withoutAi = text
     .split(/\r?\n/)
-    .filter((line) => !/^\s*AI_API_KEY\s*=/.test(line))
+    .filter((line) => !/^\s*AI_[A-Z_]+\s*=/.test(line))
     .join('\n');
-  return loadConfig({ envText: withoutKey, env: { ...env, AI_API_KEY: undefined } });
+  return loadConfig({ envText: withoutAi, env: { ...env, AI_API_KEY: undefined, AI_PROVIDER: undefined, AI_BASE_URL: undefined, AI_MODEL: undefined } });
 }
 
 /**

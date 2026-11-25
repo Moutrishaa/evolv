@@ -12,6 +12,7 @@ import { createConsoleApi, createAppApi, createFrontHandler } from './api.js';
 import { ensureConsoleKey } from './auth.js';
 import { Ledger } from './budget.js';
 import { AnthropicProvider } from './providers/anthropic.js';
+import { OpenAIProvider } from './providers/openai.js';
 import { ChangeRunner } from './changes.js';
 import { sweepWorkspaces } from './workspace.js';
 import { verifyWorkspace, createAppControl } from './verify.js';
@@ -38,7 +39,17 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
   // A damaged usage file must not stop the supervisor (the console has to stay reachable):
   // the ledger reports the problem and blocks changes instead.
   const ledger = new Ledger({ file: path.join(stateDir, 'usage.json'), totalBudget: config.tokenBudget, changeLimit: config.changeTokenLimit });
-  const provider = providerOverride ?? new AnthropicProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl });
+  const provider =
+    providerOverride ??
+    (config.provider === 'openai'
+      ? new OpenAIProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl ?? config.baseUrl })
+      : new AnthropicProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl }));
+  // Where AI requests go, shown in the console (the host and model, never the key).
+  const ai = demo
+    ? { provider: 'demo (scripted)', model: null, host: null }
+    : config.provider === 'openai'
+      ? /** @type {any} */ (provider).describe?.() ?? { provider: 'openai', model: config.model, host: null }
+      : { provider: 'anthropic', model: config.model, host: aiBaseUrl ? new URL(aiBaseUrl).host : 'api.anthropic.com' };
 
   const app = new AppProcess({ appDir, dataDir, port: appPort });
   const proxy = createProxy({ getPort: () => appPort });
@@ -78,6 +89,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
             budget: ledger.snapshot(),
             notice: changes.notice,
             mode: demo ? 'demo' : 'normal',
+            ai,
             node: process.version,
           },
         };
@@ -111,6 +123,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
     changes,
     ledger,
     hub,
+    ai,
     async close() {
       await app.stop();
       for (const srv of [server, consoleServer]) {
@@ -127,6 +140,8 @@ if (isMain) {
   const config = loadConfig({ envPath: path.join(root, '.env') });
   const sup = await startSupervisor({ config, root });
   console.log(`Evolv running at http://127.0.0.1:${config.port}`);
+  // Shown so a wrong AI_BASE_URL is noticed before any request is sent. Never the key.
+  console.log(`AI provider: ${sup.ai.provider}${sup.ai.model ? `, model ${sup.ai.model}` : ''}${sup.ai.host ? `, requests go to ${sup.ai.host}` : ''}`);
   console.log(`Recovery console (signed-in link, keep it private): http://127.0.0.1:${config.consolePort}/#key=${sup.consoleKey}`);
   console.log('Later, run "npm run console" to open it again.');
   let closing = false;

@@ -117,7 +117,9 @@ export async function runAgent({ provider, tools, request, ledger, changeId, max
     for (const use of toolUses) {
       if (finished) break; // nothing runs after finish
       onEvent({ type: 'tool', name: use.name, file: use.name === 'finish' ? null : fileHint(use.input) });
-      const r = tools.execute(use.name, use.input);
+      // An OpenAI-compatible provider sets `inputError` when it could not read the call's arguments.
+      // The tool is not run (even if some of the input looks usable); the model is told why.
+      const r = use.inputError ? { ok: false, content: `Error: ${use.inputError}` } : tools.execute(use.name, use.input);
       results.push({ type: 'tool_result', tool_use_id: use.id, content: r.content, is_error: !r.ok });
       if (r.finish) finished = r.finish;
     }

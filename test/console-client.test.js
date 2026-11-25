@@ -62,3 +62,43 @@ test('ignores a malformed fragment', () => {
   const r = run({ hash: '#key=not-a-real-key' });
   assert.equal(r.store.size, 0);
 });
+
+// ---------- Status shows where AI requests go ----------
+async function statusRows(ai, extra = {}) {
+  const rows = [];
+  const el = () => ({
+    addEventListener() {}, replaceChildren() { rows.length = 0; }, setAttribute() {},
+    append(...c) { rows.push(...c.map((x) => x.textContent)); },
+    hidden: false, textContent: '', dataset: {}, scrollTop: 0, clientHeight: 0, scrollHeight: 0,
+  });
+  const payload = { app: { state: 'running', pid: 1, port: 3001, uptimeMs: 0, restarts: 0 }, version: { current: 1, count: 1 }, budget: { used: 0, total: 10 }, notice: null, mode: 'normal', node: 'v26', ai, ...extra };
+  const sandbox = {
+    document: { getElementById: el, querySelectorAll: () => [], createElement: el },
+    location: { hash: '', pathname: '/', search: '' },
+    history: { replaceState() {} },
+    localStorage: { getItem: () => 'ab'.repeat(32), setItem() {} },
+    fetch: async () => ({ ok: true, status: 200, json: async () => payload }),
+    setInterval: () => 0,
+    console,
+  };
+  vm.runInNewContext(source, sandbox);
+  await new Promise((r) => setImmediate(r));
+  const pairs = {};
+  for (let i = 0; i + 1 < rows.length; i += 2) pairs[rows[i]] = rows[i + 1];
+  return pairs;
+}
+
+test('Status names the AI provider and model, and shows the host requests go to', async () => {
+  const rows = await statusRows({ provider: 'openai', model: 'llama-3.3-70b-versatile', host: 'api.groq.com' });
+  assert.equal(rows['AI provider'], 'openai (model llama-3.3-70b-versatile)');
+  assert.equal(rows['AI requests go to'], 'api.groq.com');
+});
+
+test('Status copes with a demo (no host) and with an older server that sends no ai block', async () => {
+  const demo = await statusRows({ provider: 'demo (scripted)', model: null, host: null });
+  assert.equal(demo['AI provider'], 'demo (scripted)');
+  assert.equal('AI requests go to' in demo, false);
+  const none = await statusRows(undefined);
+  assert.equal('AI provider' in none, false);
+  assert.equal(none['Current version'], 'v1');
+});

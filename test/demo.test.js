@@ -383,3 +383,10 @@ test('the agent cannot see or reach the demo provider, the demo data folder or t
     await env.close();
   }
 });
+
+test('demo ignores every AI setting in .env, so a real provider setup can never get in its way', () => {
+  const c = loadDemoConfig({ envText: 'AI_PROVIDER=openai\nAI_BASE_URL=http://not-allowed.example/v1\nAI_MODEL=\nAI_API_KEY=sk-x', env: { AI_PROVIDER: 'openai', AI_BASE_URL: 'http://not-allowed.example/v1' } });
+  assert.equal(c.provider, 'anthropic');
+  assert.equal(c.baseUrl, undefined);
+  assert.equal(c.apiKey, '');
+});

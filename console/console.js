@@ -57,6 +57,8 @@ function renderStatus(s) {
     ...(s.budget.problem ? [['Usage record problem', s.budget.problem]] : []),
     ...(s.notice ? [['Notice', s.notice.message]] : []),
     ...(s.mode === 'demo' ? [['Mode', 'DEMO: scripted AI, no real model']] : []),
+    ...(s.ai ? [['AI provider', `${s.ai.provider}${s.ai.model ? ` (model ${s.ai.model})` : ''}`]] : []),
+    ...(s.ai && s.ai.host ? [['AI requests go to', s.ai.host]] : []),
     ['Node', s.node],
   ];
   statusList.replaceChildren();

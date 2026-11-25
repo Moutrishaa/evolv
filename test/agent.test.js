@@ -255,3 +255,62 @@ test('a rejected key surfaces as provider_error and the key never appears in the
   const bad = new AnthropicProvider({ apiKey: KEY + 'ZZZ', model: 'm', baseUrl: env.fake.url, retryDelayMs: 1 });
   await assert.rejects(() => env.run({ provider: bad }), (e) => e.code === 'provider_error' && !e.message.includes('ZZZ') && !e.message.includes(KEY));
 });
+
+// ---------- tool calls whose arguments could not be read (OpenAI-compatible providers) ----------
+const stubProvider = (replies) => {
+  const sent = [];
+  return {
+    sent,
+    assertReady() {},
+    async complete({ messages }) {
+      sent.push(JSON.parse(JSON.stringify(messages)));
+      const content = replies[Math.min(sent.length - 1, replies.length - 1)];
+      return { content, stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 }, estimated: false };
+    },
+  };
+};
+const BAD = 'The arguments for "edit_file" were not valid JSON, so the tool was not run. Send the arguments as one JSON object.';
+
+test('a call with an inputError is answered with an error result and the tool is NOT run', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
+  const target = path.join(env.ws, 'public', 'style.css');
+  const before = fs.readFileSync(target, 'utf8');
+  const stub = stubProvider([
+    [{ type: 'tool_use', id: 'bad1', name: 'edit_file', input: { path: 'public/style.css', old_text: '#fafafa', new_text: '#000000' }, inputError: BAD }],
+    [{ type: 'tool_use', id: 'f1', name: 'finish', input: { summary: 'Gave up.' } }],
+  ]);
+  const result = await env.run({ provider: stub });
+  assert.equal(result.summary, 'Gave up.');
+  assert.equal(fs.readFileSync(target, 'utf8'), before, 'the edit must not have run, even though its input looked valid');
+  const back = stub.sent[1].at(-1).content[0];
+  assert.equal(back.tool_use_id, 'bad1');
+  assert.equal(back.is_error, true);
+  assert.equal(back.content, `Error: ${BAD}`);
+});
+
+test('a bad call does not stop the good calls in the same reply, and progress is still reported', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
+  const stub = stubProvider([
+    [
+      { type: 'tool_use', id: 'bad1', name: 'write_file', input: {}, inputError: 'The arguments for "write_file" were not valid JSON, so the tool was not run.' },
+      { type: 'tool_use', id: 'good1', name: 'write_file', input: { path: 'two.txt', content: '2' } },
+    ],
+    [{ type: 'tool_use', id: 'f1', name: 'finish', input: { summary: 'Done.' } }],
+  ]);
+  await env.run({ provider: stub });
+  assert.equal(fs.existsSync(path.join(env.ws, 'two.txt')), true);
+  const results = stub.sent[1].at(-1).content;
+  assert.deepEqual(results.map((r) => [r.tool_use_id, r.is_error]), [['bad1', true], ['good1', false]]);
+  assert.deepEqual(env.events.filter((e) => e.type === 'tool').map((e) => e.name), ['write_file', 'write_file', 'finish']);
+});
+
+test('a finish call with an inputError does not finish the change', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
+  const stub = stubProvider([
+    [{ type: 'tool_use', id: 'f0', name: 'finish', input: { summary: 'Sneaky.' }, inputError: 'The arguments for "finish" were not valid JSON, so the tool was not run.' }],
+    [{ type: 'tool_use', id: 'f1', name: 'finish', input: { summary: 'Properly done.' } }],
+  ]);
+  const result = await env.run({ provider: stub });
+  assert.equal(result.summary, 'Properly done.');
+  assert.equal(result.steps, 2);
+});
