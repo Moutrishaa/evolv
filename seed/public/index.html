@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Evolv app</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>Welcome to your Evolv app</h1>
+    <p>This is a starting point. Describe a change in the chat and it will be built for you.</p>
+  </main>
+
+  <footer>
+    <a href="/_evolv">Recovery console</a>
+  </footer>
+
+  <button id="chat-toggle" type="button" aria-expanded="false" aria-controls="chat-panel">Chat</button>
+  <section id="chat-panel" hidden aria-label="Request a change">
+    <p id="chat-log" role="status"></p>
+    <form id="chat-form">
+      <label for="chat-input">What would you like to change?</label>
+      <textarea id="chat-input" rows="3" maxlength="4000" required></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </section>
+
+  <script src="/chat.js"></script>
+</body>
+</html>

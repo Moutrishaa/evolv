@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Evolv recovery console</title>
+  <link rel="stylesheet" href="/_evolv/console.css">
+</head>
+<body>
+  <header>
+    <h1>Evolv</h1>
+    <a href="/">Back to your app</a>
+  </header>
+
+  <nav aria-label="Console sections">
+    <button type="button" data-tab="status" aria-selected="true">Status</button>
+    <button type="button" data-tab="logs" aria-selected="false">Logs</button>
+  </nav>
+
+  <main>
+    <section id="tab-status" aria-label="Status">
+      <dl id="status-list"></dl>
+      <p id="status-error" role="alert" hidden></p>
+    </section>
+    <section id="tab-logs" aria-label="Logs" hidden>
+      <pre id="log-view"></pre>
+    </section>
+  </main>
+
+  <script src="/_evolv/console.js"></script>
+</body>
+</html>

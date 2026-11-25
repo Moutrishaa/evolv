@@ -1,0 +1,14 @@
+{
+  "name": "evolv",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A self-editing app with a recovery console.",
+  "scripts": {
+    "start": "node supervisor/main.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
