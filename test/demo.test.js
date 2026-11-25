@@ -291,7 +291,8 @@ test('demo uses its own data folder and never creates or touches the real app/ o
 });
 
 test('demo makes no AI network call, never builds the real provider, and ignores a real key', async () => {
-  const realKey = 'sk-ant-real-looking-key-that-must-never-load-0123456789';
+  // Built at run time, so this file never contains a key-shaped string (test/no-secrets.test.js scans for them).
+  const realKey = ['sk', 'ant', 'real-looking-key-that-must-never-load-0123456789'].join('-');
   const calls = [];
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (...a) => (calls.push(String(a[0])), realFetch(...a));
