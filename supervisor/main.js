@@ -19,14 +19,16 @@ import { EventHub } from './events.js';
 import { createChangeRoutes } from './change-routes.js';
 
 /**
- * @param {{ config: import('./config.js').Config, root: string, appPort?: number, aiBaseUrl?: string, verifySettleMs?: number }} o
- *   aiBaseUrl and verifySettleMs are code-level test seams (the fake provider, a shorter settle).
- *   They are never read from .env or the environment.
+ * @param {{ config: import('./config.js').Config, root: string, appPort?: number, aiBaseUrl?: string, verifySettleMs?: number,
+ *   provider?: { assertReady: () => void, complete: Function }, dataRoot?: string, demo?: { banner: string } }} o
+ *   Optional hooks, all set only by code that starts the supervisor, never read from .env or the environment:
+ *   aiBaseUrl and verifySettleMs (tests), provider (a stand-in for the AI), dataRoot (where app/ and state/ live,
+ *   default: root) and demo (shows a banner and reports mode "demo"). `npm start` sets none of them.
  */
-export async function startSupervisor({ config, root, appPort = config.port + 1, aiBaseUrl, verifySettleMs = 2000 }) {
-  const appDir = path.join(root, 'app');
+export async function startSupervisor({ config, root, appPort = config.port + 1, aiBaseUrl, verifySettleMs = 2000, provider: providerOverride, dataRoot = root, demo }) {
+  const appDir = path.join(dataRoot, 'app');
   const dataDir = path.join(appDir, 'data');
-  const stateDir = path.join(root, 'state'); // outside app/: the sandbox cannot read it
+  const stateDir = path.join(dataRoot, 'state'); // outside app/: the sandbox cannot read it
   const workspacesDir = path.join(stateDir, 'workspaces');
   const consoleKey = ensureConsoleKey(stateDir);
 
@@ -36,7 +38,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
   // A damaged usage file must not stop the supervisor (the console has to stay reachable):
   // the ledger reports the problem and blocks changes instead.
   const ledger = new Ledger({ file: path.join(stateDir, 'usage.json'), totalBudget: config.tokenBudget, changeLimit: config.changeTokenLimit });
-  const provider = new AnthropicProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl });
+  const provider = providerOverride ?? new AnthropicProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl });
 
   const app = new AppProcess({ appDir, dataDir, port: appPort });
   const proxy = createProxy({ getPort: () => appPort });
@@ -63,6 +65,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
     port: config.consolePort,
     key: consoleKey,
     consoleDir: path.join(root, 'console'),
+    banner: demo?.banner,
     routes: {
       'GET /status': async () => {
         const versions = await listVersions(appDir);
@@ -74,6 +77,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
             version: { current: versions[0]?.id ?? null, count: versions.length },
             budget: ledger.snapshot(),
             notice: changes.notice,
+            mode: demo ? 'demo' : 'normal',
             node: process.version,
           },
         };
@@ -84,7 +88,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
   });
 
   // Submit, cancel and progress. Nothing else may ever be added to this table.
-  const appApi = createAppApi({ port: config.port, consolePort: config.consolePort, routes: changeRoutes });
+  const appApi = createAppApi({ port: config.port, consolePort: config.consolePort, routes: changeRoutes, banner: demo?.banner });
 
   const server = http.createServer(createFrontHandler({ appApi, proxy }));
   const consoleServer = http.createServer((req, res) => void consoleApi.handle(req, res));

@@ -233,3 +233,13 @@ CONSOLE_PORT=3002
 - **Integration (fake provider = local HTTP server returning canned tool calls):** success, crash on start, smoke route 500, step limit, budget exhausted mid-change, cancel, undo, restore, reset.
 - **Sandbox:** a hostile seed app attempts the four attacks above. All must fail.
 - **End to end:** manual run with real Claude against criteria 2 and 3.
+
+## 15. Dev-only demo mode (outside the MVP acceptance criteria)
+
+`npm run demo` starts the normal supervisor with a scripted stand-in for the AI, so the widget, live progress, promotion, rejection and rollback can be tried in a browser without an API key. It exists for demonstration and manual testing only.
+
+- **How it is selected.** Only by running the separate `supervisor/demo.js` entry point. It is not a `.env` setting or an environment variable, so it cannot be left on by accident, and `npm start` (`supervisor/main.js`) has no way to enable it. The AI-written app cannot read `supervisor/` or `.env`, cannot start a process, and the agent's path guard cannot see them, so neither can switch it on.
+- **What is real.** The tools, path guard, sandbox, verifier, promotion, rollback, token ledger, SSE and every authentication, Origin and Host check are exactly the production code. Only the model is scripted, and its tool calls pass through the same guard as a real model's.
+- **Isolation.** It uses its own `demo-data/` folder (git-ignored, safe to delete) for the app, state, console key and ledger, so the real `app/` and `state/` are never touched. It never builds the real provider, ignores any key in `.env` or the environment, and makes no network call.
+- **Loud banner.** A red "DEMO MODE" banner appears on the console page (before sign-in), on the `/_evolv` pointer page, in Status (`mode: "demo"`) and in the terminal, plus a `[DEMO]` title prefix. It is deliberately not placed in app pages, which the AI can edit.
+- **Scenarios,** chosen by a word in the request, checked in this order: `rollback`, `crash`, `nolink`, `slow`, `navy`, `page`; anything else gets a "nothing to apply" result. `navy` toggles the colours. `page` adds an About page. `crash` and `nolink` are rejected by the verifier. `rollback` passes verification and then fails on the demo's live `data/`, so it is rolled back. `slow` can be cancelled.

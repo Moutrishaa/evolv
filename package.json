@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node supervisor/main.js",
     "console": "node supervisor/console-link.js",
+    "demo": "node supervisor/demo.js",
     "test": "node --test"
   },
   "engines": {

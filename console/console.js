@@ -56,6 +56,7 @@ function renderStatus(s) {
     ['AI usage', `${s.budget.used} / ${s.budget.total} tokens`],
     ...(s.budget.problem ? [['Usage record problem', s.budget.problem]] : []),
     ...(s.notice ? [['Notice', s.notice.message]] : []),
+    ...(s.mode === 'demo' ? [['Mode', 'DEMO: scripted AI, no real model']] : []),
     ['Node', s.node],
   ];
   statusList.replaceChildren();

@@ -14,3 +14,4 @@ pre { margin: 0; max-height: 70vh; overflow: auto; font: 13px/1.4 ui-monospace, 
 #login-help { margin: 1.5rem; padding: 1rem; background: #fff8e1; border: 1px solid #e0c060; }
 #login-help[hidden], main[hidden] { display: none; }
 code { background: #eef; padding: 0.1rem 0.3rem; }
+.demo-banner { position: sticky; top: 0; z-index: 10; padding: 0.6rem 1.5rem; background: #b00020; color: #fff; text-align: center; font-size: 1rem; }

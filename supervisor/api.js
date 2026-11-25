@@ -160,6 +160,14 @@ function failFrom(err, res) {
   fail(res, 500, 'internal_error', 'Something went wrong in the supervisor.');
 }
 
+/** @param {string} s */
+const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+/** Adds a loud, escaped banner to the console page. Used only when a banner is configured. @param {string} html @param {string} text */
+const withBanner = (html, text) =>
+  html.replace('<title>', '<title>[DEMO] ').replace('<body>', `<body>
+  <div class="demo-banner" role="alert"><strong>DEMO MODE</strong> ${escapeHtml(text)}</div>`);
+
 /** @param {number} port */
 const hostsFor = (port) => new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 /** @param {number} port */
@@ -190,7 +198,7 @@ function decodePath(rawPathname) {
  * Recovery console origin: UI shell, plus the full API behind a bearer token.
  * @param {{ port: number, consoleDir: string, key: string, routes: Routes }} o
  */
-export function createConsoleApi({ port, consoleDir, key, routes }) {
+export function createConsoleApi({ port, consoleDir, key, routes, banner }) {
   const hosts = hostsFor(port);
   const origins = originsFor(port);
   return {
@@ -216,7 +224,8 @@ export function createConsoleApi({ port, consoleDir, key, routes }) {
         const name = pathname.replace(/^\//, '');
         const entry = Object.hasOwn(CONSOLE_FILES, name) ? CONSOLE_FILES[/** @type {keyof typeof CONSOLE_FILES} */ (name)] : null;
         if (!entry) return fail(res, 404, 'not_found', 'Not found.');
-        const body = fs.readFileSync(path.join(consoleDir, entry[0]));
+        let body = fs.readFileSync(path.join(consoleDir, entry[0]));
+        if (banner && entry[0] === 'index.html') body = Buffer.from(withBanner(body.toString('utf8'), banner));
         return send(res, 200, { 'Content-Type': entry[1] }, method === 'HEAD' ? undefined : body);
       } catch (err) {
         failFrom(err, res);
@@ -230,13 +239,13 @@ export function createConsoleApi({ port, consoleDir, key, routes }) {
  * @param {{ port: number, consolePort: number, routes: Routes }} o
  *   routes are the ONLY routes served under /_evolv/api (B2 registers submit, cancel, events)
  */
-export function createAppApi({ port, consolePort, routes }) {
+export function createAppApi({ port, consolePort, routes, banner }) {
   const hosts = hostsFor(port);
   const origins = originsFor(port);
   const pointerPage = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Recovery console</title>
 <style>body{font:16px system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem}</style></head>
-<body><h1>Recovery console</h1>
+<body>${banner ? `<p><strong>DEMO MODE:</strong> ${escapeHtml(banner)}</p>` : ''}<h1>Recovery console</h1>
 <p>The console runs on its own address so that your app's pages can never reach it.</p>
 <p><a href="http://127.0.0.1:${consolePort}/">Open the recovery console</a></p>
 <p>First time on this browser? Run <code>npm run console</code> in the Evolv folder to open a signed-in link.</p>
