@@ -613,6 +613,32 @@ test('the newer "Parsing failed" 400 is recoverable too, with or without an erro
   assert.equal((await ask(make())).toolFormatFailure, true);
 });
 
+// ---------- the provider's DAILY limit: say so, and do not wait for hours ----------
+const DAILY = 'Rate limit reached for model `m` in organization `org_x` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199648, Requested 424. Please try again in 31.104s.';
+
+test('a daily-limit 429 is announced as a daily limit, retried twice, then reported plainly', async () => {
+  fresh([apiError(429, DAILY, { code: 'rate_limit_exceeded', headers: { 'retry-after': '0.01' } })]);
+  const waits = [];
+  const err = await ask(make({ retryDelayMs: 1 }), { onWait: (w) => waits.push(w) }).catch((e) => e);
+  assert.ok(err instanceof ProviderError);
+  assert.match(err.message, /daily/i);
+  assert.match(err.message, /another|different|upgrade|tomorrow|later/i, 'it says what to do');
+  assert.deepEqual(waits.map((w) => w.reason), ['daily_limit', 'daily_limit']);
+  assert.equal(fake.requests.length, 3, 'the first try plus two retries, not five');
+  assert.ok(!err.message.includes(KEY));
+});
+
+test('a daily limit that will take a long time to clear is reported at once, without waiting', async () => {
+  fresh([apiError(429, DAILY.replace('31.104s', '2h5m3s'), { code: 'rate_limit_exceeded', headers: { 'retry-after': '7503' } })]);
+  const waits = [];
+  const { value: err, ms } = await timed(() => ask(make({ retryDelayMs: 1 }), { onWait: (w) => waits.push(w) }).catch((e) => e));
+  assert.ok(err instanceof ProviderError);
+  assert.match(err.message, /daily/i);
+  assert.equal(waits.length, 0);
+  assert.equal(fake.requests.length, 1);
+  assert.ok(ms < 1000);
+});
+
 test('a huge failed_generation is costed but capped, and never echoed or leaked', async () => {
   fresh([toolUseFailed(`${KEY} ${'x'.repeat(400000)}`)]);
   const out = await ask(make());
@@ -693,4 +719,60 @@ test('5xx and dropped connections keep their two quick retries (only rate limits
   const err = await failure([apiError(503, 'x')]);
   assert.match(err.message, /busy|unavailable/i);
   assert.equal(fake.requests.length, 3);
+});
+
+// ---------- providers with extra fields (Gemini) ----------
+// Gemini 3 puts a "thought signature" on each tool call (under extra_content) and answers 400 if it
+// is not sent back with the history. Any extra_content is kept and returned untouched, so such providers work.
+const SIGNED = { google: { thought_signature: 'SIG-abc123==' } };
+
+test('extra_content on a tool call is kept, and sent back unchanged with the history', async () => {
+  fresh([chatReply({ toolCalls: [{ ...call('read_file', { path: 'a' }, 'c1'), extra_content: SIGNED }, call('list_files', {}, 'c2')] })]);
+  const out = await ask(make());
+  assert.deepEqual(out.content[0].extraContent, SIGNED);
+  assert.equal('extraContent' in out.content[1], false, 'calls without it get nothing added');
+
+  fresh([textOnly()]);
+  await make().complete({
+    system: 's',
+    tools: TOOLS,
+    messages: [
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: out.content },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }, { type: 'tool_result', tool_use_id: 'c2', content: 'y' }] },
+    ],
+  });
+  const sent = fake.requests[0].body.messages.find((m) => m.role === 'assistant').tool_calls;
+  assert.deepEqual(sent[0].extra_content, SIGNED);
+  assert.equal('extra_content' in sent[1], false);
+});
+
+test('only a plain object is accepted as extra_content (anything else is dropped, never forwarded)', async () => {
+  for (const bad of ['text', 5, null, ['x'], true]) {
+    fresh([chatReply({ toolCalls: [{ ...call('read_file', {}, 'c1'), extra_content: bad }] })]);
+    const out = await ask(make());
+    assert.equal('extraContent' in out.content[0], false, `dropped: ${JSON.stringify(bad)}`);
+  }
+});
+
+test('the key is never sent inside extra_content or anywhere but the Authorization header', async () => {
+  fresh([chatReply({ toolCalls: [{ ...call('read_file', {}, 'c1'), extra_content: SIGNED }] })]);
+  await ask(make());
+  assert.ok(!fake.requests[0].raw.includes(KEY));
+});
+
+test('an error body that is an array (Gemini) still shows its message, key scrubbed, and is not retried', async () => {
+  const err = await failure([{ status: 400, body: [{ error: { code: 400, message: 'Function call is missing a thought_signature', status: 'INVALID_ARGUMENT' } }] }]);
+  assert.match(err.message, /400/);
+  assert.match(err.message, /missing a thought_signature/);
+  assert.equal(fake.requests.length, 1);
+  const leaky = await failure([{ status: 400, body: [{ error: { message: `bad key ${KEY}` } }] }]);
+  assert.ok(!leaky.message.includes(KEY));
+  assert.match(leaky.message, /\[hidden\]/);
+});
+
+test('an array-shaped tool-format failure is still recoverable', async () => {
+  fresh([{ status: 400, body: [{ error: { message: 'Failed to parse tool call arguments as JSON', code: 'tool_use_failed' } }] }]);
+  const out = await ask(make());
+  assert.equal(out.toolFormatFailure, true);
 });

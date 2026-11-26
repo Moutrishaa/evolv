@@ -17,6 +17,9 @@ const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
 const unreadable = () => new ProviderError('The AI provider sent a reply that could not be understood.');
 
+/** @param {unknown} v */
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
 /** Keeps names short and printable before they go into a message. @param {unknown} name */
 const safeName = (name) => String(name).replace(/[^\w.-]/g, '').slice(0, 64);
 
@@ -47,7 +50,8 @@ function toOpenAIMessages(/** @type {string} */ system, /** @type {any[]} */ mes
       const calls = blocks
         .filter((b) => b.type === 'tool_use')
         // A call whose arguments could not be read goes back as {}: strict servers reject invalid JSON in the history.
-        .map((b) => ({ id: b.id, type: 'function', function: { name: b.name, arguments: b.inputError ? '{}' : JSON.stringify(b.input ?? {}) } }));
+        // extraContent is provider-specific data (Gemini's thought signature) that must go back exactly as it came.
+        .map((b) => ({ id: b.id, type: 'function', function: { name: b.name, arguments: b.inputError ? '{}' : JSON.stringify(b.input ?? {}) }, ...(isPlainObject(b.extraContent) ? { extra_content: b.extraContent } : {}) }));
       /** @type {any} */
       const msg = { role: 'assistant', content: text || (calls.length ? null : '') };
       if (calls.length) msg.tool_calls = calls;
@@ -91,6 +95,13 @@ function stopReasonOf(reason) {
   if (reason === 'stop') return 'end_turn';
   if (reason === 'length') return 'max_tokens';
   return typeof reason === 'string' ? reason : null;
+}
+
+/** "about 5 minutes", "about 2 hours". @param {number} seconds */
+function humanDuration(seconds) {
+  if (seconds < 90) return `${Math.ceil(seconds)} seconds`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} minutes`;
+  return `${Math.round(seconds / 3600)} hours`;
 }
 
 export class OpenAIProvider {
@@ -155,7 +166,7 @@ export class OpenAIProvider {
     let failure = networkFailure;
     // Rate limits get their own, much greater, patience than other trouble: a per-minute token limit
     // only clears with time, and one change makes several calls that each re-send the conversation.
-    const wait = { used: { rate: 0, other: 0 }, signal, onWait, cancelled };
+    const wait = { used: { rate: 0, other: 0, daily: 0 }, signal, onWait, cancelled };
     for (;;) {
       if (signal?.aborted) throw cancelled();
       const timeout = AbortSignal.timeout(requestTimeoutMs);
@@ -208,6 +219,15 @@ export class OpenAIProvider {
           throw new ProviderError('The AI account has no remaining credit or quota (HTTP 429). Check the plan and billing with your AI provider.');
         }
         const seconds = retryAfter !== null && retryAfter !== '' ? Number(retryAfter) : NaN;
+        // A DAILY quota (tokens or requests per day) is a different problem from a per-minute limit:
+        // it can take hours to clear, so say so plainly and do not keep the user waiting for nothing.
+        if (/tokens per day|requests per day|\(TPD\)|\(RPD\)/i.test(error.message ?? '')) {
+          const clears = Number.isFinite(seconds) && seconds > 0 ? `, and about ${humanDuration(seconds)} must pass before enough frees up` : '';
+          failure = `The AI provider's daily limit is used up (HTTP 429)${clears}. Try again later, upgrade the plan, or put another API key or provider in the .env file.`;
+          if (Number.isFinite(seconds) && seconds > 120) throw new ProviderError(failure);
+          if (!(await this.#backoff('daily_limit', retryAfter, wait))) break;
+          continue;
+        }
         failure = `The AI provider is rate-limiting requests (HTTP 429). ${Number.isFinite(seconds) && seconds > 0 ? `Try again in about ${Math.ceil(seconds)} seconds.` : 'Wait a minute and try again.'}`;
         if (!(await this.#backoff('rate_limit', retryAfter, wait))) break;
         continue;
@@ -225,7 +245,9 @@ export class OpenAIProvider {
   /** Pulls { message, code, type } out of an error body, if it has the usual shape. @param {string} text */
   #errorOf(text) {
     try {
-      const e = JSON.parse(text)?.error;
+      const parsed = JSON.parse(text);
+      // Some providers (Gemini) wrap the error in a list: [{ error: {...} }].
+      const e = (Array.isArray(parsed) ? parsed[0] : parsed)?.error;
       if (typeof e === 'string') return { message: e };
       if (e && typeof e === 'object') {
         return { message: typeof e.message === 'string' ? e.message : undefined, code: e.code, type: e.type, failed: typeof e.failed_generation === 'string' ? e.failed_generation : undefined };
@@ -242,14 +264,15 @@ export class OpenAIProvider {
    *               (4x, 8x, 16x... the base delay), because a per-minute limit can need more than the header says;
    *   other:      up to `retries` times, Retry-After if given, otherwise a short backoff.
    * Never longer than `maxRetryWaitMs` per wait. The wait is announced through onWait, and a cancel ends it at once.
-   * @param {'rate_limit'|'unavailable'|'network'} reason @param {string|null} retryAfter
-   * @param {{ used: { rate: number, other: number }, signal?: AbortSignal, onWait?: Function, cancelled: () => Error }} ctx
+   * @param {'rate_limit'|'daily_limit'|'unavailable'|'network'} reason @param {string|null} retryAfter
+   * @param {{ used: { rate: number, other: number, daily: number }, signal?: AbortSignal, onWait?: Function, cancelled: () => Error }} ctx
    */
   async #backoff(reason, retryAfter, { used, signal, onWait, cancelled }) {
     const { retries, retryDelayMs, rateLimitRetries, maxRetryWaitMs } = this.settings;
-    const isRate = reason === 'rate_limit';
-    const bucket = isRate ? 'rate' : 'other';
-    if (used[bucket] >= (isRate ? rateLimitRetries : retries)) return false;
+    const isDaily = reason === 'daily_limit'; // a daily quota rarely clears quickly, so it gets only two retries
+    const isRate = reason === 'rate_limit' || isDaily;
+    const bucket = isDaily ? 'daily' : isRate ? 'rate' : 'other';
+    if (used[bucket] >= (isDaily ? 2 : isRate ? rateLimitRetries : retries)) return false;
     const attempt = used[bucket]++;
     const header = retryAfter !== null && retryAfter !== '' ? Number(retryAfter) * 1000 : NaN;
     const headerMs = Number.isFinite(header) && header >= 0 ? header : NaN;
@@ -306,7 +329,7 @@ export class OpenAIProvider {
       const id = uniqueId(tc.id);
       used.add(id);
       const { input, inputError } = readArguments(fn.name, fn.arguments, cutOff);
-      content.push({ type: 'tool_use', id, name: fn.name, input, ...(inputError ? { inputError } : {}) });
+      content.push({ type: 'tool_use', id, name: fn.name, input, ...(inputError ? { inputError } : {}), ...(isPlainObject(tc.extra_content) ? { extraContent: tc.extra_content } : {}) });
     }
 
     const u = data.usage;
