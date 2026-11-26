@@ -2,8 +2,8 @@
 // Reads the key from state/console.key (which the sandboxed app cannot read).
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { loadConfig } from './config.js';
-import { ensureConsoleKey } from './auth.js';
+import { loadConfig } from './config/config.js';
+import { ensureConsoleKey } from './middleware/auth.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const config = loadConfig({ envPath: path.join(root, '.env') });

@@ -1,15 +1,229 @@
-body { font: 16px/1.5 system-ui, sans-serif; margin: 0; color: #1a1a1a; background: #fafafa; }
-main { max-width: 40rem; margin: 4rem auto; padding: 0 1rem; }
-footer { text-align: center; padding: 2rem 1rem; }
-footer a { color: #555; font-size: 0.9rem; }
+@font-face {
+  font-family: "Manrope";
+  src: url("/fonts/Manrope-latin.woff2") format("woff2");
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+}
 
-#chat-toggle { position: fixed; right: 1rem; bottom: 1rem; padding: 0.6rem 1rem; border-radius: 2rem; border: 0; background: #1f3a6e; color: #fff; cursor: pointer; }
-#chat-panel { position: fixed; right: 1rem; bottom: 4rem; width: min(22rem, calc(100vw - 2rem)); padding: 1rem; background: #fff; border: 1px solid #ccc; border-radius: 0.5rem; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15); }
-#chat-panel[hidden] { display: none; }
-#chat-panel label { display: block; margin-bottom: 0.25rem; }
-#chat-panel textarea { width: 100%; box-sizing: border-box; font: inherit; }
-#chat-panel button { margin-top: 0.5rem; }
-#chat-log { margin: 0 0 0.75rem; color: #8a4b00; }
-#chat-output { margin: 0 0 0.75rem; max-height: 10rem; overflow: auto; padding: 0.5rem; background: #f4f4f4; border: 1px solid #ddd; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
-#chat-output[hidden], #chat-cancel[hidden] { display: none; }
-#chat-panel button:disabled { opacity: 0.6; cursor: not-allowed; }
+:root {
+  --ink: #111111;
+  --muted: #7b7b86;
+  --link: #4a14d9;
+  --card-ink: #111111;
+  --page-bg: radial-gradient(125% 125% at 50% 10%, #fff 40%, #6366f1 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  font: 500 16px/1.5 "Manrope", system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--page-bg);
+  background-attachment: fixed;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.25rem 0;
+}
+
+.brand {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.console-link {
+  color: var(--link);
+  font-size: 1rem;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 1rem 5rem;
+  text-align: center;
+}
+
+h1 {
+  margin: 0 0 0.9rem;
+  font-size: clamp(2.4rem, 6vw, 3.4rem);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+.lead {
+  margin: 0 0 2.2rem;
+  max-width: 37rem;
+  font-size: 1.15rem;
+  font-weight: 500;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+#chat-panel {
+  width: min(750px, 100%);
+}
+
+.composer {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 0.9rem 0.9rem 1.25rem;
+  background: #fff;
+  border: 6px solid #f7f7fd;
+  border-radius: 1.5rem;
+  box-shadow: none;
+  background-clip: padding-box;
+}
+
+.composer:focus-within {
+  box-shadow: 0 0 0 3px rgba(99, 51, 238, 0.25), 0 2px 18px rgba(90, 70, 160, 0.08);
+}
+
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 8rem;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 1.1rem;
+  color: var(--card-ink);
+  text-align: left;
+  padding: 0.55rem 0;
+  field-sizing: content;
+}
+
+.composer textarea::placeholder {
+  color: #a3a3ad;
+}
+
+.send {
+  flex: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: #0b0b0b;
+  color: #fff;
+  cursor: pointer;
+}
+
+.send:hover:not(:disabled) {
+  background: #2a2a2a;
+}
+
+.send:disabled,
+.chips[aria-disabled="true"] .chip {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.cancel {
+  margin-top: 0.75rem;
+  padding: 0.45rem 1rem;
+  border: 1px solid #c9c9d3;
+  border-radius: 2rem;
+  background: #fff;
+  color: var(--card-ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.cancel[hidden],
+#chat-output[hidden] {
+  display: none;
+}
+
+#chat-log {
+  margin: 0.9rem 0 0;
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+#chat-log:empty {
+  display: none;
+}
+
+#chat-output {
+  margin: 0.75rem 0 0;
+  max-height: 10rem;
+  overflow: auto;
+  padding: 0.6rem;
+  text-align: left;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 0.5rem;
+  font: 12px/1.4 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--card-ink);
+}
+
+.or {
+  margin: 2.6rem 0 1.1rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.6rem;
+  max-width: 46rem;
+}
+
+.chip {
+  padding: 0.7rem 0.9rem;
+  border: 0;
+  border-radius: 0.8rem;
+  background: #fff;
+  color: #222;
+  font: 500 0.78rem/1.3 "Manrope", system-ui, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 1px 8px rgba(90, 70, 160, 0.08);
+}
+
+.chips:not([aria-disabled="true"]) .chip:hover {
+  box-shadow: 0 2px 12px rgba(90, 70, 160, 0.18);
+}
+
+.chip:focus-visible,
+.send:focus-visible,
+.cancel:focus-visible,
+.console-link:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+}

@@ -35,6 +35,8 @@ for (const button of document.querySelectorAll('nav button')) {
 
 class LoginNeeded extends Error {}
 
+const PHASES = { agent: 'being written', verify: 'being checked', promote: 'being put live' };
+
 async function getJson(path) {
   const key = currentKey();
   if (!key) throw new LoginNeeded();
@@ -44,7 +46,47 @@ async function getJson(path) {
   return res.json();
 }
 
+/** Cancels the running change. The server says why if it is too late. @param {string} id @param {HTMLButtonElement} button */
+async function cancelChange(id, button) {
+  button.disabled = true;
+  button.textContent = 'Cancelling...';
+  let problem = '';
+  try {
+    const key = currentKey();
+    if (!key) throw new LoginNeeded();
+    const res = await fetch(API + '/changes/' + id + '/cancel', {
+      method: 'POST', cache: 'no-store', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    if (!res.ok) {
+      problem = 'Could not cancel (error ' + res.status + ').';
+      try { problem = (await res.json()).error.message || problem; } catch { /* keep the generic text */ }
+    }
+  } catch (err) {
+    problem = err instanceof LoginNeeded ? 'Sign in first, then try again.' : 'Could not reach the supervisor to cancel.';
+  }
+  await refresh();
+  if (problem) {
+    statusError.textContent = problem;
+    statusError.hidden = false;
+  }
+}
+
 function renderStatus(s) {
+  statusList.replaceChildren();
+  if (s.change) {
+    const dt = document.createElement('dt');
+    dt.textContent = 'Change in progress';
+    const dd = document.createElement('dd');
+    dd.textContent = PHASES[s.change.phase] || 'running';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel this change';
+    cancel.disabled = s.change.phase === 'promote'; // too late once it is being put live
+    if (cancel.disabled) cancel.title = 'It is too late to cancel: the change is being put live.';
+    cancel.addEventListener('click', () => cancelChange(s.change.id, cancel));
+    dd.append(' ', cancel);
+    statusList.append(dt, dd);
+  }
   const rows = [
     ['App', s.app.state],
     ['Process id', s.app.pid ?? 'none'],
@@ -61,7 +103,6 @@ function renderStatus(s) {
     ...(s.ai && s.ai.host ? [['AI requests go to', s.ai.host]] : []),
     ['Node', s.node],
   ];
-  statusList.replaceChildren();
   for (const [label, value] of rows) {
     const dt = document.createElement('dt');
     dt.textContent = label;

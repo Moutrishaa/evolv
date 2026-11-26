@@ -1,7 +1,6 @@
 // Chat widget. Sends a change request to the supervisor, shows live progress, and reloads the
 // page when the new version is live. Everything the server says is written as text, never markup.
-const toggle = document.getElementById('chat-toggle');
-const panel = document.getElementById('chat-panel');
+const chips = document.getElementById('chat-chips');
 const form = document.getElementById('chat-form');
 const input = document.getElementById('chat-input');
 const log = document.getElementById('chat-log');
@@ -29,6 +28,7 @@ function setRunning(on) {
   sendButton.disabled = on;
   input.disabled = on;
   cancelButton.hidden = !on;
+  chips.setAttribute('aria-disabled', String(on));
 }
 
 function payload(event) {
@@ -52,14 +52,28 @@ function toolText(name, file) {
   }
 }
 
-async function errorMessage(res) {
+async function errorInfo(res) {
   try {
     const body = await res.json();
-    if (body && body.error && body.error.message) return body.error.message;
+    if (body && body.error && body.error.message) return { code: body.error.code, message: body.error.message };
   } catch {
     /* not JSON */
   }
-  return `Something went wrong (error ${res.status}). Please try again.`;
+  return { code: null, message: `Something went wrong (error ${res.status}). Please try again.` };
+}
+
+async function errorMessage(res) {
+  return (await errorInfo(res)).message;
+}
+
+// The page forgets a running change when it is reloaded, but the Recovery Console still knows it
+// and can cancel it. The link is built here, not in the HTML, so the home page keeps exactly one
+// static link to the console.
+function pointToConsole() {
+  const link = document.createElement('a');
+  link.href = '/_evolv';
+  link.textContent = 'Open the Recovery Console';
+  log.append(' ', link);
 }
 
 function follow(id) {
@@ -85,7 +99,9 @@ function follow(id) {
   stream.addEventListener('waiting', (e) => {
     const d = payload(e);
     const seconds = Number.isInteger(d.seconds) && d.seconds > 0 ? d.seconds : null; // only a whole number is ever shown
-    const why = d.reason === 'rate_limit' ? 'The AI provider is busy (rate limit)' : 'The AI provider is having trouble';
+    const why = d.reason === 'rate_limit' ? 'The AI provider is busy (rate limit)'
+      : d.reason === 'daily_limit' ? "Your AI provider's daily limit is almost used up"
+      : 'The AI provider is having trouble';
     say(seconds ? `${why}. Waiting ${seconds} seconds, then trying again...` : `${why}. Waiting a moment, then trying again...`);
   });
   stream.addEventListener('done', (e) => {
@@ -110,16 +126,9 @@ function follow(id) {
   });
 }
 
-toggle.addEventListener('click', () => {
-  const open = panel.hidden;
-  panel.hidden = !open;
-  toggle.setAttribute('aria-expanded', String(open));
-});
-
-form.addEventListener('submit', async (event) => {
-  event.preventDefault();
+async function submitText(text) {
   if (running) return;
-  const request = input.value.trim();
+  const request = text.trim();
   if (!request) {
     say('Type what you would like to change first.');
     return;
@@ -137,7 +146,13 @@ form.addEventListener('submit', async (event) => {
     return;
   }
   if (!res.ok) {
-    say(await errorMessage(res));
+    const info = await errorInfo(res);
+    if (info.code === 'busy') {
+      say(`${info.message} You can cancel it in the Recovery Console.`);
+      pointToConsole();
+    } else {
+      say(info.message);
+    }
     setRunning(false);
     return;
   }
@@ -153,6 +168,25 @@ form.addEventListener('submit', async (event) => {
     return;
   }
   follow(id);
+}
+
+form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  submitText(input.value);
+});
+
+// Enter sends, Shift+Enter starts a new line.
+input.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  submitText(input.value);
+});
+
+// A prompt chip sends its request straight away, exactly like typing it and pressing Send.
+chips.addEventListener('click', (event) => {
+  const chip = event.target && event.target.closest ? event.target.closest('button[data-request]') : null;
+  if (!chip || running) return;
+  submitText(chip.dataset.request || '');
 });
 
 cancelButton.addEventListener('click', async () => {

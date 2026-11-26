@@ -4,23 +4,27 @@
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { loadConfig } from './config.js';
-import { AppProcess } from './process.js';
-import { ensureSeeded, listVersions, promote } from './versions.js';
-import { createProxy } from './proxy.js';
-import { createConsoleApi, createAppApi, createFrontHandler } from './api.js';
-import { ensureConsoleKey } from './auth.js';
-import { Ledger } from './budget.js';
-import { AnthropicProvider } from './providers/anthropic.js';
-import { OpenAIProvider } from './providers/openai.js';
-import { ChangeRunner } from './changes.js';
-import { sweepWorkspaces } from './workspace.js';
-import { verifyWorkspace, createAppControl } from './verify.js';
-import { EventHub } from './events.js';
-import { createChangeRoutes } from './change-routes.js';
+import { loadConfig } from './config/config.js';
+import { AppProcess } from './models/app-process.js';
+import { ensureSeeded, listVersions } from './models/versions.js';
+import { promote } from './services/promote.js';
+import { createProxy } from './controllers/proxy.controller.js';
+import { createConsoleApi } from './routes/console.routes.js';
+import { createAppApi, createFrontHandler } from './routes/app.routes.js';
+import { ensureConsoleKey } from './middleware/auth.js';
+import { Ledger } from './models/ledger.js';
+import { AnthropicProvider } from './services/providers/anthropic.js';
+import { OpenAIProvider } from './services/providers/openai.js';
+import { ChangeRunner } from './services/change-runner.js';
+import { sweepWorkspaces } from './models/workspace.js';
+import { verifyWorkspace, createAppControl } from './services/verify.js';
+import { EventHub } from './models/event-hub.js';
+import { CHANGE_TIMEOUT_MS } from './constants/limits.js';
+import { createChangeRoutes } from './controllers/change.controller.js';
+import { createConsoleController } from './controllers/console.controller.js';
 
 /**
- * @param {{ config: import('./config.js').Config, root: string, appPort?: number, aiBaseUrl?: string, verifySettleMs?: number, aiRetryDelayMs?: number,
+ * @param {{ config: import('./config/config.js').Config, root: string, appPort?: number, aiBaseUrl?: string, verifySettleMs?: number, aiRetryDelayMs?: number,
  *   provider?: { assertReady: () => void, complete: Function }, dataRoot?: string, demo?: { banner: string } }} o
  *   Optional hooks, all set only by code that starts the supervisor, never read from .env or the environment:
  *   aiBaseUrl, verifySettleMs and aiRetryDelayMs (tests), provider (a stand-in for the AI), dataRoot (where app/ and state/ live,
@@ -63,7 +67,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
     provider,
     ledger,
     maxSteps: config.agentMaxSteps,
-    timeoutMs: 5 * 60 * 1000,
+    timeoutMs: CHANGE_TIMEOUT_MS,
     onEvent: (e) => hub.publish(/** @type {any} */ (e)),
     log: (line) => app.logs.push(line),
     verify: (ws, opts) => verifyWorkspace({ dir: ws.dir, timeoutMs: config.verifyTimeoutMs, settleMs: verifySettleMs, consolePort: config.consolePort, ...opts }),
@@ -78,23 +82,7 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
     consoleDir: path.join(root, 'console'),
     banner: demo?.banner,
     routes: {
-      'GET /status': async () => {
-        const versions = await listVersions(appDir);
-        const st = app.status();
-        return {
-          status: 200,
-          body: {
-            app: { ...st, uptimeMs: st.state === 'running' && st.startedAt ? Date.now() - st.startedAt : 0 },
-            version: { current: versions[0]?.id ?? null, count: versions.length },
-            budget: ledger.snapshot(),
-            notice: changes.notice,
-            mode: demo ? 'demo' : 'normal',
-            ai,
-            node: process.version,
-          },
-        };
-      },
-      'GET /logs': () => ({ status: 200, body: { lines: app.logs.lines() } }),
+      ...createConsoleController({ appDir, app, ledger, changes, ai, demo }),
       ...changeRoutes,
     },
   });

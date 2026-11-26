@@ -39,13 +39,13 @@ Ports come from `.env`: `PORT` (3000), app = `PORT + 1`, `CONSOLE_PORT` (default
 
 ## 2. Startup (`npm start` -> `supervisor/main.js`)
 
-1. `config.js` reads `.env` and validates it. Bad values stop the start with a clear message.
-2. `auth.js` creates or loads the console key at `state/console.key` (256-bit random). It is outside `app/`, so the sandboxed app cannot read it.
-3. `versions.js` seeds `app/` from `seed/` on first run. `app/` is its own git repository, so every saved version is a commit.
-4. `workspace.js` sweeps leftover staging folders from a crash.
-5. `budget.js` loads the token ledger `state/usage.json`. A damaged file blocks new changes but does not stop the supervisor.
+1. `config/config.js` reads `.env` and validates it. Bad values stop the start with a clear message.
+2. `middleware/auth.js` creates or loads the console key at `state/console.key` (256-bit random). It is outside `app/`, so the sandboxed app cannot read it.
+3. `models/versions.js` seeds `app/` from `seed/` on first run. `app/` is its own git repository, so every saved version is a commit.
+4. `models/workspace.js` sweeps leftover staging folders from a crash.
+5. `models/ledger.js` loads the token ledger `state/usage.json`. A damaged file blocks new changes but does not stop the supervisor.
 6. The AI provider is chosen: `AI_PROVIDER=openai` gives `providers/openai.js` (also used for Groq), otherwise `providers/anthropic.js`.
-7. Both HTTP servers start (app face on 3000, console face on 3002), then `process.js` starts the sandboxed app on 3001.
+7. Both HTTP servers start (app face on 3000, console face on 3002), then `models/app-process.js` starts the sandboxed app on 3001.
 8. The terminal prints the app URL, the AI provider and model (never the key), and the signed-in console link. `npm run console` (`console-link.js`) opens that link again.
 
 ## 3. Every endpoint
@@ -54,7 +54,7 @@ Ports come from `.env`: `PORT` (3000), app = `PORT + 1`, `CONSOLE_PORT` (default
 
 | Request | What happens |
 |---|---|
-| `GET /health`, `GET /`, any page | Proxied to the app on 3001 (`proxy.js`). If the app is down, a "The app isn't responding" page links to the console. |
+| `GET /health`, `GET /`, any page | Proxied to the app on 3001 (`controllers/proxy.controller.js`). If the app is down, a "The app isn't responding" page links to the console. |
 | `GET /_evolv` | A pointer page linking to the console. |
 | `POST /_evolv/api/changes` | Submit a change. Body `{"request": "..."}`. Answers `202 {id}`. |
 | `POST /_evolv/api/changes/:id/cancel` | Cancel the running change. |
@@ -72,13 +72,13 @@ Ports come from `.env`: `PORT` (3000), app = `PORT + 1`, `CONSOLE_PORT` (default
 
 Undo, restore and reset are described in the PRD but **are not built yet**. The console has no such routes today.
 
-### Checks on every request (`api.js`)
+### Checks on every request (`middleware/http.js`, `routes/`)
 
 - `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`. This blocks DNS-rebinding.
 - `OPTIONS` (CORS preflight) is refused, so another site cannot call the API with custom headers.
 - `Origin` must match exactly for writes.
 - Bodies must be `application/json` and at most 16 KB.
-- Console `/api/*` needs `Authorization: Bearer <key>`, compared in constant time (`auth.js`). There are no cookies.
+- Console `/api/*` needs `Authorization: Bearer <key>`, compared in constant time (`middleware/auth.js`). There are no cookies.
 - Change ids are 128-bit random, so a page cannot guess another change to watch or cancel.
 
 ## 4. A change from start to end ("Add an about page")
@@ -111,22 +111,22 @@ chat widget        supervisor                         AI provider      git / san
 
 ### Step by step
 
-1. **Submit.** The widget in `seed/public/chat.js` calls `POST /_evolv/api/changes`. `change-routes.js` hands the text to `ChangeRunner.start()` (`changes.js`).
+1. **Submit.** The widget in `seed/public/chat.js` calls `POST /_evolv/api/changes`. `controllers/change.controller.js` hands the text to `ChangeRunner.start()` (`changes.js`).
 2. **Admission.** It rejects, before any AI call, if the text is empty, over 4,000 characters or contains control characters. It also rejects if another change is running (`busy`, only one at a time), if the token budget is spent or the ledger is damaged, or if the provider has no key.
-3. **Subscribe.** The widget opens `GET .../events` (SSE) and shows progress. `events.js` (`EventHub`) keeps recent events per change and scrubs real file paths from everything it sends.
-4. **Stage.** `workspace.js` runs `git worktree add --detach <state>/workspaces/<id> HEAD`. The agent works on this copy, never on the live app. Git is always run with `execFile`, never through a shell.
-5. **Agent loop** (`agent.js`), per step:
+3. **Subscribe.** The widget opens `GET .../events` (SSE) and shows progress. `models/event-hub.js` (`EventHub`) keeps recent events per change and scrubs real file paths from everything it sends.
+4. **Stage.** `models/workspace.js` runs `git worktree add --detach <state>/workspaces/<id> HEAD`. The agent works on this copy, never on the live app. Git is always run with `execFile`, never through a shell.
+5. **Agent loop** (`services/agent.js`), per step:
    - `ledger.checkBeforeCall()` enforces the total budget and the per-change cap before spending anything.
    - `provider.complete()` sends the system prompt, the whole conversation and the tool list to the AI.
    - Tokens used are recorded in the ledger.
-   - Each tool call goes through `tools.js` and runs inside the staging copy.
+   - Each tool call goes through `services/tools.js` and runs inside the staging copy.
    - The result is added to the conversation and the loop repeats.
    - It ends when the model calls `finish`, or on a limit (steps, 5 minutes, token cap, cancel).
 6. **Verify** (section 6). Any failure discards the staging copy and the live app is untouched.
-7. **Promote** (`versions.js`): commit in the staging copy, stop the app, `git merge --ff-only` into `app/`, restart, wait for `/health`. If it is not healthy, roll back to the previous version automatically.
+7. **Promote** (`services/promote.js`): commit in the staging copy, stop the app, `git merge --ff-only` into `app/`, restart, wait for `/health`. If it is not healthy, roll back to the previous version automatically.
 8. **Finish.** The runner is released, the staging copy is deleted, and only then are `done` or `failed` announced.
 
-## 5. The AI call (`supervisor/providers/`)
+## 5. The AI call (`supervisor/services/providers/`)
 
 | | OpenAI-compatible (`openai.js`, used for Groq) | Anthropic (`anthropic.js`) |
 |---|---|---|
@@ -137,7 +137,7 @@ chat widget        supervisor                         AI provider      git / san
 
 Both providers keep the key in a private field and scrub it from every error text. The agent loop never sees it. `AI_BASE_URL` must be https, except for a server on this computer.
 
-**Tools the AI may call** (`tools.js`): `list_files`, `read_file`, `search`, `write_file`, `edit_file`, `delete_file`, `finish`. Every path first passes `pathguard.js`. The guard allows only forward slashes and rejects `..`, absolute paths, drive letters, Windows tricks, symlinks, and `.git*`, `.env*`, `node_modules` and `data/`. The AI cannot reach `supervisor/`, `console/`, `.env` or git history at all, because its tools only see the staging copy of `app/`.
+**Tools the AI may call** (`services/tools.js`): `list_files`, `read_file`, `search`, `write_file`, `edit_file`, `delete_file`, `finish`. Every path first passes `pathguard.js`. The guard allows only forward slashes and rejects `..`, absolute paths, drive letters, Windows tricks, symlinks, and `.git*`, `.env*`, `node_modules` and `data/`. The AI cannot reach `supervisor/`, `console/`, `.env` or git history at all, because its tools only see the staging copy of `app/`.
 
 **Error handling:**
 
@@ -150,7 +150,7 @@ Both providers keep the key in a private field and scrub it from every error tex
 | 400 "tool_use_failed" / "Parsing failed" (the model wrote a broken tool call) | Treated as a reply with no tool call. The model is told and retries. Stops after 3 in a row. |
 | any other 400 | Stops with the provider's message |
 
-## 6. Verification (`verify.js`)
+## 6. Verification (`services/verify.js`)
 
 Runs the staged app in its own sandbox on a free port and checks, in order:
 
@@ -163,7 +163,7 @@ Runs the staged app in its own sandbox on a free port and checks, in order:
 
 Limits: `VERIFY_TIMEOUT_MS` (default 8000). Output shown to the user has real paths removed and is capped at 4,000 characters.
 
-## 7. The sandbox (`process.js`)
+## 7. The sandbox (`models/app-process.js`)
 
 The app runs as `node --permission --allow-fs-read=<app> --allow-fs-write=<app>/data --allow-net --max-old-space-size=256 server.js`.
 
@@ -174,7 +174,7 @@ The app runs as `node --permission --allow-fs-read=<app> --allow-fs-write=<app>/
 - Accepted risk: `--allow-net` is needed to listen on a port, and Node cannot restrict outbound traffic more finely.
 - Crash handling: the app restarts after 500 ms, 1 s and 2 s. After 3 crashes inside 60 s it gives up and logs "use Undo or Restore in the console".
 
-## 8. The token budget (`budget.js`)
+## 8. The token budget (`models/ledger.js`)
 
 - `TOKEN_BUDGET`: total across all changes (`state/usage.json`).
 - `CHANGE_TOKEN_LIMIT`: the cap for one change.
@@ -214,3 +214,22 @@ At most 5 streams per change and 20 in total are kept. A heartbeat is sent every
 ## 11. Where the time goes
 
 A typical change takes 3 to 6 model calls (seconds each), then verify (about 3 to 6 s, mostly the app starting plus the 2 s settle), then promote (one restart). Fewer steps is the biggest lever. A model that calls tools correctly the first time helps most, because every broken tool call costs a full extra round trip.
+
+## 12. Code layout (`supervisor/`)
+
+MVC-style, with Node built-ins only. The AI agent can never edit any of it.
+
+| Folder | Role | Files |
+|---|---|---|
+| `main.js`, `demo.js`, `console-link.js` | Entry points (start the servers, demo mode, open the console) | |
+| `constants/` | Every fixed value: limits, patterns, HTTP headers, messages, provider defaults. Data only, no imports. | `limits.js`, `patterns.js`, `http.js`, `messages.js`, `changes.js`, `sandbox.js`, `storage.js`, `providers.js`, `demo.js`, `index.js` |
+| `config/` | Reads and validates `.env` | `config.js` |
+| `models/` | State and data: token ledger, git versions, staging workspaces, the sandboxed app process, progress events | `ledger.js`, `versions.js`, `workspace.js`, `app-process.js`, `event-hub.js` |
+| `services/` | Business logic: the agent loop, change lifecycle, verification, promote, tools, AI providers | `agent.js`, `change-runner.js`, `verify.js`, `promote.js`, `tools.js`, `demo-provider.js`, `providers/` |
+| `controllers/` | Request handlers | `change.controller.js`, `console.controller.js`, `proxy.controller.js` |
+| `routes/` | Which URL goes where, per origin | `app.routes.js`, `console.routes.js`, `router.js` |
+| `middleware/` | Host/Origin checks, body limits, security headers, bearer token | `http.js`, `auth.js` |
+| `security/` | The path guard | `pathguard.js` |
+| `views/` | HTML the supervisor returns (the pointer page, the "app is down" page) | `html.js` |
+
+Tests live in `test/`, in folders that mirror these (`models/`, `services/`, `controllers/`, `routes/`, `security/`, `config/`, `constants/`, plus `e2e/`). Shared helpers are in `test-fixtures/` (`helpers/`, `fakes/`, `apps/`), outside `test/` on purpose: `node --test` runs every file inside a `test/` folder.

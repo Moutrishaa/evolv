@@ -11,9 +11,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { loadConfig } from './config.js';
+import { loadConfig } from './config/config.js';
 import { startSupervisor } from './main.js';
-import { createDemoProvider, DEMO_BANNER, DEMO_PHRASES } from './demo-provider.js';
+import { createDemoProvider, DEMO_BANNER, DEMO_PHRASES } from './services/demo-provider.js';
 
 /**
  * Reads .env like normal but DROPS the AI key, from the file and from the environment,
@@ -32,7 +32,7 @@ export function loadDemoConfig({ envPath, envText, env = process.env } = {}) {
 }
 
 /**
- * @param {{ config: import('./config.js').Config, root: string, dataRoot: string, appPort?: number,
+ * @param {{ config: import('./config/config.js').Config, root: string, dataRoot: string, appPort?: number,
  *   delayMs?: number, slowDelayMs?: number, verifySettleMs?: number, log?: (line: string) => void }} o
  */
 export async function startDemo({ config, root, dataRoot, appPort, delayMs = 600, slowDelayMs = 1000, verifySettleMs, log = console.log }) {

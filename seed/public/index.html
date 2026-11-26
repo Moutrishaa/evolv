@@ -3,30 +3,43 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>My Evolv app</title>
+  <title>Evolv</title>
+  <link rel="preload" href="/fonts/Manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <header class="top">
+    <span class="brand">Evolv</span>
+    <a class="console-link" href="/_evolv">Recovery Console</a>
+  </header>
+
   <main>
-    <h1>Welcome to your Evolv app</h1>
-    <p>This is a starting point. Describe a change in the chat and it will be built for you.</p>
+    <h1>Meet Evolv</h1>
+    <p class="lead">Describe a change in plain words. Evolv rewrites itself, checks the result, and shows it to you. Nothing goes live unless it works.</p>
+
+    <section id="chat-panel" aria-label="Request a change">
+      <form id="chat-form" class="composer">
+        <label for="chat-input" class="sr-only">What would you like to change?</label>
+        <textarea id="chat-input" rows="1" maxlength="4000" placeholder="Describe a change" required></textarea>
+        <button id="chat-send" class="send" type="submit" aria-label="Send">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </form>
+      <button id="chat-cancel" class="cancel" type="button" hidden>Cancel</button>
+      <p id="chat-log" role="status" aria-live="polite"></p>
+      <pre id="chat-output" hidden></pre>
+    </section>
+
+    <p class="or">OR START WITH ONE OF THESE</p>
+    <div id="chat-chips" class="chips">
+      <button type="button" class="chip" data-request="Change the background to dark gradient background. Edit only the :root block at the top of public/style.css, one line at a time, with small edits: 1) replace the line --page-bg: radial-gradient(125% 125% at 50% 10%, #fff 40%, #6366f1 100%); with --page-bg: radial-gradient(125% 125% at 50% 10%, #000 40%, #63e 100%); 2) replace --ink: #111111; with --ink: #ffffff; 3) replace --muted: #7b7b86; with --muted: #f0f0f8; 4) replace --link: #4a14d9; with --link: #ffffff; This makes the page background a full-screen dark gradient and turns the heading, intro text, labels and the Recovery console link white, giving strong contrast. Do not change anything else: the chat box and the chips stay light with dark text, and the chat widget and the Recovery console link on the home page must keep working.">Change the background to dark gradient background</button>
+      <button type="button" class="chip" data-request="Add a notes page">Add a notes page</button>
+      <button type="button" class="chip" data-request="Split the screen into two columns">Split the screen into two columns</button>
+      <button type="button" class="chip" data-request="Add a to-do list">Add a to-do list</button>
+      <button type="button" class="chip" data-request="Change the heading font colour">Change the heading font colour</button>
+      <button type="button" class="chip" data-request="Turn the chat into a floating bubble in the bottom right">Turn the chat into a floating bubble in the bottom right</button>
+    </div>
   </main>
-
-  <footer>
-    <a href="/_evolv">Recovery console</a>
-  </footer>
-
-  <button id="chat-toggle" type="button" aria-expanded="false" aria-controls="chat-panel">Chat</button>
-  <section id="chat-panel" hidden aria-label="Request a change">
-    <p id="chat-log" role="status" aria-live="polite"></p>
-    <pre id="chat-output" hidden></pre>
-    <form id="chat-form">
-      <label for="chat-input">What would you like to change?</label>
-      <textarea id="chat-input" rows="3" maxlength="4000" required></textarea>
-      <button id="chat-send" type="submit">Send</button>
-      <button id="chat-cancel" type="button" hidden>Cancel</button>
-    </form>
-  </section>
 
   <script src="/chat.js"></script>
 </body>
