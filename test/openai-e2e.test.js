@@ -109,7 +109,8 @@ test('a persistent rate limit fails the change in plain words; the live app is u
     assert.equal(last.data.code, 'provider_error');
     assert.match(last.data.message, /rate-limit/i);
     assert.match(last.data.message, /your app was not changed/i);
-    assert.equal(env.fake.requests.length, 3, '1 try + 2 retries');
+    assert.equal(env.fake.requests.length, 6, '1 try + 5 retries');
+    assert.equal(events.filter((e) => e.type === 'waiting').length, 5, 'each wait was announced');
     assert.deepEqual(polled.failures, []);
     assert.equal(env.sup.app.status().pid, pid);
     assert.equal((await env.versions()).length, 1);
@@ -206,6 +207,24 @@ test('a model that keeps failing stops after three tries, in plain words, with t
     assert.equal(env.fake.requests.length, 3);
     assert.equal(env.sup.app.status().pid, pid);
     assert.equal((await env.versions()).length, 1);
+    await assertKeyNowhere(env, events);
+  } finally {
+    await env.close();
+  }
+});
+
+// ---------- a rate limit that clears ----------
+test('a rate limit that clears is waited out, announced to the widget, and the change still goes live', async () => {
+  const good = openaiChangeScript({ 'public/style.css': NAVY_CSS }, 'Made the page navy.')[0];
+  const env = await openai({ script: (body, n) => (n < 2 ? apiError(429, 'Rate limit reached for tokens per minute', { headers: { 'retry-after': '0' } }) : good) });
+  try {
+    const { events, last } = await env.runChange('Make it navy');
+    assert.equal(last.type, 'done', JSON.stringify(last));
+    assert.equal(env.fake.requests.length, 3, 'two rate-limited tries, then success');
+    const waits = events.filter((e) => e.type === 'waiting');
+    assert.equal(waits.length, 2);
+    assert.ok(waits.every((e) => e.data.reason === 'rate_limit' && Number.isInteger(e.data.seconds)));
+    assert.match((await request(`${env.base}/style.css`)).body, /#000080/);
     await assertKeyNowhere(env, events);
   } finally {
     await env.close();

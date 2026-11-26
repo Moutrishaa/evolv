@@ -61,6 +61,24 @@ test('a change succeeds end to end: look, edit, finish', async () => {
   assert.equal(env.ledger.used(), 600);
 });
 
+test('tool events carry timing and token numbers for the model call that produced them', async () => {
+  const env = await setup({
+    script: [
+      reply([toolUse('read_file', { path: 'public/style.css' })]),
+      reply([toolUse('finish', { summary: 'Done.' })]),
+    ],
+  });
+  await env.run();
+  const tools = env.events.filter((e) => e.type === 'tool');
+  assert.equal(tools.length, 2);
+  for (const e of tools) {
+    assert.ok(Number.isInteger(e.modelMs) && e.modelMs >= 0, 'modelMs is a whole number of milliseconds');
+    assert.equal(e.inputTokens, 100);
+    assert.equal(e.outputTokens, 50);
+  }
+  assert.ok(!JSON.stringify(env.events).includes(KEY));
+});
+
 test('progress events name the step and the tool and file, in order, with no file contents', async () => {
   const env = await setup({
     script: [
@@ -353,4 +371,34 @@ test('a success in between resets the count', async () => {
   const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
   const stub = scripted([formatFailure(), formatFailure(), callOf('list_files', {}, 'l1'), formatFailure(), formatFailure(), callOf('finish', { summary: 'Done.' }, 'f1')]);
   assert.equal((await env.run({ provider: stub })).summary, 'Done.');
+});
+
+// ---------- rate-limit waits, and economy ----------
+test('a provider wait is announced as a "waiting" event and is not a step', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
+  const stub = {
+    assertReady() {},
+    async complete({ onWait }) {
+      onWait?.({ seconds: 5, reason: 'rate_limit' });
+      return callOf('finish', { summary: 'Done.' }, 'f1');
+    },
+  };
+  const result = await env.run({ provider: stub });
+  assert.deepEqual(env.events.filter((e) => e.type === 'waiting').map((e) => [e.seconds, e.reason]), [[5, 'rate_limit']]);
+  assert.equal(result.steps, 1);
+  assert.deepEqual(env.events.map((e) => e.type), ['step', 'waiting', 'tool']);
+});
+
+test('a provider that does not report waits still works (the hook is optional)', async () => {
+  const env = await setup({ script: [reply([toolUse('finish', { summary: 'x' })])] });
+  const result = await env.run({ provider: scripted([callOf('finish', { summary: 'Fine.' }, 'f1')]) });
+  assert.equal(result.summary, 'Fine.');
+});
+
+test('the system prompt tells the model to spend few calls, because every call re-sends the conversation', () => {
+  const p = buildSystemPrompt();
+  assert.match(p, /economical/i);
+  assert.match(p, /never read the same file twice/i);
+  assert.match(p, /as soon as you can/i);
+  assert.ok(!/[^\x00-\x7f]/.test(p), 'still plain ASCII');
 });

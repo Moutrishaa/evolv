@@ -343,8 +343,8 @@ test('a 429 that persists ends as a plain provider_error, after the retries, wit
   const err = await failure([apiError(429, 'Rate limit reached for tokens per minute', { headers: { 'retry-after': '0' } })]);
   assert.equal(err.code, 'provider_error');
   assert.match(err.message, /rate-limit/i);
-  assert.equal(fake.requests.length, 3, '1 try + 2 retries');
-  const hinted = await failure([apiError(429, 'slow down', { headers: { 'retry-after': '37' } })], { retries: 0 });
+  assert.equal(fake.requests.length, 6, '1 try + 5 retries: a per-minute limit needs patience');
+  const hinted = await failure([apiError(429, 'slow down', { headers: { 'retry-after': '37' } })], { rateLimitRetries: 0 });
   assert.match(hinted.message, /about 37 seconds/);
   assert.equal(fake.requests.length, 1);
 });
@@ -600,6 +600,19 @@ test('it is recognised by its message too, and without failed_generation the out
   assert.equal(out.usage.outputTokens, 0);
 });
 
+const PARSING_FAILED = "Parsing failed. The model generated output that could not be parsed. Please adjust your prompt. See 'failed_generation' for more details.";
+
+test('the newer "Parsing failed" 400 is recoverable too, with or without an error code', async () => {
+  for (const code of [undefined, 'json_validate_failed', 'tool_use_failed']) {
+    fresh([apiError(400, PARSING_FAILED, { code, type: 'invalid_request_error', failedGeneration: FAILED_TEXT })]);
+    const out = await ask(make());
+    assert.equal(out.toolFormatFailure, true, String(code));
+    assert.equal(out.usage.outputTokens, estimateTokens(FAILED_TEXT));
+  }
+  fresh([apiError(400, PARSING_FAILED, { type: 'invalid_request_error' })]); // recognised by its message alone
+  assert.equal((await ask(make())).toolFormatFailure, true);
+});
+
 test('a huge failed_generation is costed but capped, and never echoed or leaked', async () => {
   fresh([toolUseFailed(`${KEY} ${'x'.repeat(400000)}`)]);
   const out = await ask(make());
@@ -613,4 +626,71 @@ test('every other 400 is still a plain provider_error (only the tool-format fail
     assert.equal(err.code, 'provider_error', message);
     assert.match(err.message, /HTTP 400/);
   }
+});
+
+// ---------- rate limits: wait as long as the provider asks, grow the wait, and say so ----------
+const timed = async (fn) => {
+  const t0 = Date.now();
+  const value = await fn();
+  return { value, ms: Date.now() - t0 };
+};
+
+test('a 429 waits for Retry-After in full (not a fixed 10 seconds), including fractions', async () => {
+  fresh([apiError(429, 'slow down', { headers: { 'retry-after': '0.3' } }), textOnly('done')]);
+  const { value, ms } = await timed(() => ask(make({ retryDelayMs: 1 })));
+  assert.equal(value.content[0].text, 'done');
+  assert.ok(ms >= 290, `waited only ${ms} ms`);
+  assert.equal(fake.requests.length, 2);
+});
+
+test('the wait is capped by maxRetryWaitMs (default one minute)', async () => {
+  fresh([apiError(429, 'x', { headers: { 'retry-after': '9999' } }), textOnly('done')]);
+  const { ms } = await timed(() => ask(make({ maxRetryWaitMs: 120, retryDelayMs: 1 })));
+  assert.ok(ms >= 110 && ms < 2000, `waited ${ms} ms`);
+});
+
+test('the wait grows when Retry-After is small or missing (so a rolling per-minute limit can clear)', async () => {
+  // retryDelayMs 20 -> waits of 80, 160 and 320 ms before the fourth try
+  fresh([apiError(429, 'x'), apiError(429, 'x', { headers: { 'retry-after': '0' } }), apiError(429, 'x'), textOnly('ok')]);
+  const { value, ms } = await timed(() => ask(make({ retryDelayMs: 20 })));
+  assert.equal(value.content[0].text, 'ok');
+  assert.equal(fake.requests.length, 4);
+  assert.ok(ms >= 540, `the waits added up to only ${ms} ms`);
+});
+
+test('onWait is told about every wait: whole seconds rounded up, and why', async () => {
+  fresh([apiError(429, 'x', { headers: { 'retry-after': '0.3' } }), apiError(503, 'x'), textOnly('ok')]);
+  const waits = [];
+  await ask(make({ retryDelayMs: 1 }), { onWait: (w) => waits.push(w) });
+  assert.deepEqual(waits.map((w) => w.reason), ['rate_limit', 'unavailable']);
+  assert.equal(waits[0].seconds, 1, '0.3 seconds is announced as 1');
+  assert.ok(waits.every((w) => Number.isInteger(w.seconds) && w.seconds >= 1));
+});
+
+test('onWait is not called when there is no further try, and it is optional', async () => {
+  const waits = [];
+  await failure([apiError(429, 'x', { headers: { 'retry-after': '0' } })], { rateLimitRetries: 2 }).then(() => {});
+  fresh([apiError(429, 'x', { headers: { 'retry-after': '0' } })]);
+  await ask(make({ rateLimitRetries: 2 }), { onWait: (w) => waits.push(w) }).catch(() => {});
+  assert.equal(waits.length, 2, 'two retries, two waits, none after the last failure');
+  fresh([apiError(429, 'x', { headers: { 'retry-after': '0' } }), textOnly('fine')]);
+  assert.equal((await ask(make())).content[0].text, 'fine');
+});
+
+test('a long wait can be cancelled at once, still counting the estimated input', async () => {
+  fresh([apiError(429, 'x', { headers: { 'retry-after': '30' } })]);
+  const ctl = new AbortController();
+  const t0 = Date.now();
+  const pending = ask(make({ maxRetryWaitMs: 30000 }), { signal: ctl.signal });
+  while (fake.requests.length < 1) await new Promise((r) => setTimeout(r, 5));
+  setTimeout(() => ctl.abort(), 100);
+  await assert.rejects(pending, (e) => e.aborted === true && e.estimatedInputTokens > 0);
+  assert.ok(Date.now() - t0 < 2500, 'cancel must not wait out the 30 seconds');
+  assert.equal(fake.requests.length, 1);
+});
+
+test('5xx and dropped connections keep their two quick retries (only rate limits get the long patience)', async () => {
+  const err = await failure([apiError(503, 'x')]);
+  assert.match(err.message, /busy|unavailable/i);
+  assert.equal(fake.requests.length, 3);
 });

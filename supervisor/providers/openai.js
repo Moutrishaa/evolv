@@ -14,8 +14,6 @@ import { ProviderError } from './anthropic.js';
 import { normalizeBaseUrl } from './base-url.js';
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-const MAX_RETRY_WAIT_MS = 10_000;
-const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 
 const unreadable = () => new ProviderError('The AI provider sent a reply that could not be understood.');
 
@@ -106,14 +104,14 @@ export class OpenAIProvider {
    * }} o
    *   maxTokensField: the name of the output-limit field. Some newer models want "max_completion_tokens".
    */
-  constructor({ apiKey, model, baseUrl = DEFAULT_BASE_URL, fetchImpl = globalThis.fetch, maxTokens = 8192, maxTokensField = 'max_tokens', requestTimeoutMs = 120_000, retries = 2, retryDelayMs = 500 }) {
+  constructor({ apiKey, model, baseUrl = DEFAULT_BASE_URL, fetchImpl = globalThis.fetch, maxTokens = 8192, maxTokensField = 'max_tokens', requestTimeoutMs = 120_000, retries = 2, retryDelayMs = 500, rateLimitRetries = 5, maxRetryWaitMs = 60_000 }) {
     const base = normalizeBaseUrl(baseUrl); // throws a plain AI_BASE_URL message for an unsafe address
     this.#apiKey = apiKey || '';
     this.model = model;
     this.baseUrl = base.url;
     this.host = base.host;
     this.loopback = base.loopback;
-    this.settings = { fetchImpl, maxTokens, maxTokensField, requestTimeoutMs, retries, retryDelayMs };
+    this.settings = { fetchImpl, maxTokens, maxTokensField, requestTimeoutMs, retries, retryDelayMs, rateLimitRetries, maxRetryWaitMs };
   }
 
   /** Where requests go and which model. Never the key. */
@@ -132,10 +130,12 @@ export class OpenAIProvider {
   }
 
   /**
-   * @param {{ system: string, messages: any[], tools: any[], signal?: AbortSignal }} o
+   * @param {{ system: string, messages: any[], tools: any[], signal?: AbortSignal,
+   *   onWait?: (w: { seconds: number, reason: 'rate_limit'|'unavailable'|'network' }) => void }} o
+   *   onWait is told before each wait for a retry, so the user can be shown why nothing is happening.
    * @returns {Promise<{ content: any[], stopReason: string|null, usage: { inputTokens: number, outputTokens: number }, estimated: boolean }>}
    */
-  async complete({ system, messages, tools, signal }) {
+  async complete({ system, messages, tools, signal, onWait }) {
     this.assertReady();
     const { fetchImpl, maxTokens, maxTokensField, requestTimeoutMs, retries } = this.settings;
     /** @type {Record<string, unknown>} */
@@ -151,8 +151,12 @@ export class OpenAIProvider {
     const headers = { 'Content-Type': 'application/json' };
     if (this.#apiKey) headers.Authorization = `Bearer ${this.#apiKey}`;
 
-    let failure = 'Could not reach the AI provider. Check your internet connection and AI_BASE_URL.';
-    for (let attempt = 0; attempt <= retries; attempt++) {
+    const networkFailure = 'Could not reach the AI provider. Check your internet connection and AI_BASE_URL.';
+    let failure = networkFailure;
+    // Rate limits get their own, much greater, patience than other trouble: a per-minute token limit
+    // only clears with time, and one change makes several calls that each re-send the conversation.
+    const wait = { used: { rate: 0, other: 0 }, signal, onWait, cancelled };
+    for (;;) {
       if (signal?.aborted) throw cancelled();
       const timeout = AbortSignal.timeout(requestTimeoutMs);
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -167,7 +171,8 @@ export class OpenAIProvider {
       } catch {
         if (signal?.aborted) throw cancelled();
         if (timeout.aborted) throw new ProviderError('The AI provider took too long to respond.', { estimatedInputTokens });
-        await this.#pause(attempt, null);
+        failure = networkFailure;
+        if (!(await this.#backoff('network', null, wait))) break;
         continue; // network trouble: try again
       }
 
@@ -186,7 +191,10 @@ export class OpenAIProvider {
       // invalid JSON they answer 400 "tool_use_failed" instead of a reply, so there is nothing to read.
       // That is the model's slip, not a bad request: report it as a reply with no tool call, so the agent
       // loop tells the model and lets it try again. (The tokens were spent, so the cost is estimated.)
-      if (status === 400 && (error.code === 'tool_use_failed' || /failed to parse tool call arguments/i.test(error.message ?? ''))) {
+      // Groq words this more than one way ("Failed to parse tool call arguments", "Parsing failed. The model
+      // generated output that could not be parsed"), so the message patterns are loose and the sure sign
+      // is `failed_generation`: the raw text the model wrote, which only appears in this situation.
+      if (status === 400 && (error.code === 'tool_use_failed' || error.failed !== undefined || /failed to parse tool call arguments|parsing failed|could not be parsed/i.test(error.message ?? ''))) {
         return {
           content: [{ type: 'text', text: 'My last tool call was not valid JSON, so it was not run. I will call the tool again with valid JSON arguments.' }],
           stopReason: 'end_turn',
@@ -201,12 +209,12 @@ export class OpenAIProvider {
         }
         const seconds = retryAfter !== null && retryAfter !== '' ? Number(retryAfter) : NaN;
         failure = `The AI provider is rate-limiting requests (HTTP 429). ${Number.isFinite(seconds) && seconds > 0 ? `Try again in about ${Math.ceil(seconds)} seconds.` : 'Wait a minute and try again.'}`;
-        await this.#pause(attempt, retryAfter);
+        if (!(await this.#backoff('rate_limit', retryAfter, wait))) break;
         continue;
       }
       if (status >= 500) {
         failure = `The AI provider is busy or unavailable (HTTP ${status}). Try again in a few minutes.`;
-        await this.#pause(attempt, retryAfter);
+        if (!(await this.#backoff('unavailable', retryAfter, wait))) break;
         continue;
       }
       throw new ProviderError(`The AI provider rejected the request (HTTP ${status})${error.message ? `: ${this.#scrub(error.message).slice(0, 300)}` : ''}`);
@@ -228,13 +236,35 @@ export class OpenAIProvider {
     return {};
   }
 
-  /** Waits before a retry. Does nothing after the last attempt. @param {number} attempt @param {string|null} retryAfter */
-  async #pause(attempt, retryAfter) {
-    const { retries, retryDelayMs } = this.settings;
-    if (attempt >= retries) return;
-    const header = retryAfter !== null && retryAfter !== '' ? Number(retryAfter) : NaN;
-    const ms = Number.isFinite(header) && header >= 0 ? header * 1000 : retryDelayMs * 2 ** attempt;
-    await sleep(Math.min(ms, MAX_RETRY_WAIT_MS));
+  /**
+   * Decides whether to retry and waits first. Returns false when the retries for this kind of trouble are used up.
+   *   rate limit: up to `rateLimitRetries` times, waiting the LONGER of Retry-After and a growing backoff
+   *               (4x, 8x, 16x... the base delay), because a per-minute limit can need more than the header says;
+   *   other:      up to `retries` times, Retry-After if given, otherwise a short backoff.
+   * Never longer than `maxRetryWaitMs` per wait. The wait is announced through onWait, and a cancel ends it at once.
+   * @param {'rate_limit'|'unavailable'|'network'} reason @param {string|null} retryAfter
+   * @param {{ used: { rate: number, other: number }, signal?: AbortSignal, onWait?: Function, cancelled: () => Error }} ctx
+   */
+  async #backoff(reason, retryAfter, { used, signal, onWait, cancelled }) {
+    const { retries, retryDelayMs, rateLimitRetries, maxRetryWaitMs } = this.settings;
+    const isRate = reason === 'rate_limit';
+    const bucket = isRate ? 'rate' : 'other';
+    if (used[bucket] >= (isRate ? rateLimitRetries : retries)) return false;
+    const attempt = used[bucket]++;
+    const header = retryAfter !== null && retryAfter !== '' ? Number(retryAfter) * 1000 : NaN;
+    const headerMs = Number.isFinite(header) && header >= 0 ? header : NaN;
+    const growing = retryDelayMs * (isRate ? 4 : 1) * 2 ** attempt;
+    const ms = Math.min(isRate ? Math.max(Number.isNaN(headerMs) ? 0 : headerMs, growing) : Number.isNaN(headerMs) ? growing : headerMs, maxRetryWaitMs);
+    onWait?.({ seconds: Math.max(1, Math.ceil(ms / 1000)), reason });
+    await new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(cancelled());
+      const timer = setTimeout(resolve, ms);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(cancelled());
+      }, { once: true });
+    });
+    return true;
   }
 
   /** @param {string} text @param {number} estimatedInput */

@@ -233,3 +233,28 @@ test('server text is only ever written as text, never as markup', () => {
   assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/.test(source));
   assert.ok(!/document\.cookie|localStorage|sessionStorage/.test(source));
 });
+
+test('a rate-limit wait is explained in plain words, keeps the form locked, and the next step replaces it', async () => {
+  const w = load({ fetchImpl: async () => ok(202, { id: ID }) });
+  await submit(w);
+  w.es().emit('waiting', { seconds: 12, reason: 'rate_limit' });
+  assert.match(w.els['chat-log'].textContent, /12 seconds/);
+  assert.match(w.els['chat-log'].textContent, /busy|limit|slow/i);
+  assert.equal(w.els['chat-send'].disabled, true);
+  assert.equal(w.els['chat-cancel'].hidden, false, 'Cancel still works while waiting');
+  w.es().emit('step', { step: 4 });
+  assert.match(w.els['chat-log'].textContent, /working/i);
+  assert.ok(!/12 seconds/.test(w.els['chat-log'].textContent));
+});
+
+test('other waits are explained too, and a missing or odd number of seconds never breaks it', async () => {
+  const w = load({ fetchImpl: async () => ok(202, { id: ID }) });
+  await submit(w);
+  w.es().emit('waiting', { seconds: 3, reason: 'unavailable' });
+  assert.match(w.els['chat-log'].textContent, /3 seconds/);
+  assert.match(w.els['chat-log'].textContent, /unavailable|trouble|busy/i);
+  w.es().emit('waiting', {});
+  assert.match(w.els['chat-log'].textContent, /waiting|moment|busy/i);
+  w.es().emit('waiting', { seconds: '<script>x</script>', reason: 'rate_limit' });
+  assert.ok(!/<script>/.test(w.els['chat-log'].textContent), 'only a whole number is ever shown');
+});

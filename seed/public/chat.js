@@ -82,6 +82,12 @@ function follow(id) {
     say(`${d.label || 'Checking your app'}...`);
   });
   stream.addEventListener('promoting', () => say('Putting the new version live...'));
+  stream.addEventListener('waiting', (e) => {
+    const d = payload(e);
+    const seconds = Number.isInteger(d.seconds) && d.seconds > 0 ? d.seconds : null; // only a whole number is ever shown
+    const why = d.reason === 'rate_limit' ? 'The AI provider is busy (rate limit)' : 'The AI provider is having trouble';
+    say(seconds ? `${why}. Waiting ${seconds} seconds, then trying again...` : `${why}. Waiting a moment, then trying again...`);
+  });
   stream.addEventListener('done', (e) => {
     finished = true;
     stream.close();

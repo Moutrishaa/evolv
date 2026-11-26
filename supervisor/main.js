@@ -20,13 +20,13 @@ import { EventHub } from './events.js';
 import { createChangeRoutes } from './change-routes.js';
 
 /**
- * @param {{ config: import('./config.js').Config, root: string, appPort?: number, aiBaseUrl?: string, verifySettleMs?: number,
+ * @param {{ config: import('./config.js').Config, root: string, appPort?: number, aiBaseUrl?: string, verifySettleMs?: number, aiRetryDelayMs?: number,
  *   provider?: { assertReady: () => void, complete: Function }, dataRoot?: string, demo?: { banner: string } }} o
  *   Optional hooks, all set only by code that starts the supervisor, never read from .env or the environment:
- *   aiBaseUrl and verifySettleMs (tests), provider (a stand-in for the AI), dataRoot (where app/ and state/ live,
+ *   aiBaseUrl, verifySettleMs and aiRetryDelayMs (tests), provider (a stand-in for the AI), dataRoot (where app/ and state/ live,
  *   default: root) and demo (shows a banner and reports mode "demo"). `npm start` sets none of them.
  */
-export async function startSupervisor({ config, root, appPort = config.port + 1, aiBaseUrl, verifySettleMs = 2000, provider: providerOverride, dataRoot = root, demo }) {
+export async function startSupervisor({ config, root, appPort = config.port + 1, aiBaseUrl, verifySettleMs = 2000, aiRetryDelayMs, provider: providerOverride, dataRoot = root, demo }) {
   const appDir = path.join(dataRoot, 'app');
   const dataDir = path.join(appDir, 'data');
   const stateDir = path.join(dataRoot, 'state'); // outside app/: the sandbox cannot read it
@@ -42,8 +42,8 @@ export async function startSupervisor({ config, root, appPort = config.port + 1,
   const provider =
     providerOverride ??
     (config.provider === 'openai'
-      ? new OpenAIProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl ?? config.baseUrl })
-      : new AnthropicProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl }));
+      ? new OpenAIProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl ?? config.baseUrl, retryDelayMs: aiRetryDelayMs })
+      : new AnthropicProvider({ apiKey: config.apiKey, model: config.model, baseUrl: aiBaseUrl, retryDelayMs: aiRetryDelayMs }));
   // Where AI requests go, shown in the console (the host and model, never the key).
   const ai = demo
     ? { provider: 'demo (scripted)', model: null, host: null }

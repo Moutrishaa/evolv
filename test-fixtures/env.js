@@ -37,7 +37,7 @@ export async function startEnv({ script = [], envText = '', settleMs = 200, toke
   if (prepare) await prepare(tmp.dir); // e.g. damage a file before the supervisor starts
   const fake = provider === 'openai' ? await startFakeOpenAI({ apiKey: AI_KEY, basePath: '/v1', script }) : await startFakeProvider({ apiKey: AI_KEY, script });
   // aiBaseUrl and verifySettleMs are code-level test seams, never environment settings.
-  const sup = await startSupervisor({ config, root: tmp.dir, appPort, aiBaseUrl: fake.url, verifySettleMs: settleMs });
+  const sup = await startSupervisor({ config, root: tmp.dir, appPort, aiBaseUrl: fake.url, aiRetryDelayMs: 1, verifySettleMs: settleMs });
   const base = `http://127.0.0.1:${port}`;
   const cbase = `http://127.0.0.1:${consolePort}`;
   const auth = { Authorization: `Bearer ${sup.consoleKey}` };

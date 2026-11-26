@@ -19,6 +19,7 @@ export function buildSystemPrompt() {
     'Rules:',
     '- Edit only what the request needs. Do not refactor, rename, reformat or "improve" anything else.',
     '- Look before you change: use list_files, read_file and search. Then use edit_file for small changes and write_file for new files.',
+    '- Be economical: every call re-sends the whole conversation and costs tokens, and providers limit tokens per minute. Read only the files you need to change, never read the same file twice, skip list_files and search when you already know the path, and make the edit as soon as you can.',
     '- App contract: the entry point is server.js and it must listen on process.env.PORT (on 127.0.0.1). GET /health must keep returning 200. GET / must keep returning an HTML page.',
     '- Keep evolv.json up to date. Its "smoke" list holds every route that must respond; add a route there when you add a page.',
     '- Use Node built-in modules only. Do not add npm packages, do not run shell commands, do not start child processes, and do not create binary files.',
@@ -51,7 +52,7 @@ const fileHint = (input) => {
  *   maxSteps: number,
  *   timeoutMs: number,
  *   signal?: AbortSignal,
- *   onEvent?: (e: { type: 'step', step: number } | { type: 'tool', name: string, file: string|null }) => void,
+ *   onEvent?: (e: { type: 'step', step: number } | { type: 'tool', name: string, file: string|null, modelMs: number, inputTokens: number, outputTokens: number } | { type: 'waiting', seconds: number, reason: string }) => void,
  * }} o
  * @returns {Promise<{ summary: string, steps: number }>}
  */
@@ -82,8 +83,13 @@ export async function runAgent({ provider, tools, request, ledger, changeId, max
     const callSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
     let response;
+    const callStart = Date.now();
     try {
-      response = await provider.complete({ system, messages, tools: tools.definitions, signal: callSignal });
+      response = await provider.complete({
+        system, messages, tools: tools.definitions, signal: callSignal,
+        // A provider that is waiting out a rate limit says so, and the user is shown why nothing is happening.
+        onWait: (/** @type {{ seconds: number, reason: string }} */ w) => onEvent({ type: 'waiting', seconds: w.seconds, reason: w.reason }),
+      });
     } catch (err) {
       const e = /** @type {any} */ (err);
       // The real cost of an interrupted call is unknown: count the estimate, rounded up.
@@ -99,6 +105,7 @@ export async function runAgent({ provider, tools, request, ledger, changeId, max
       throw e;
     }
 
+    const modelMs = Date.now() - callStart; // how long this model call took
     try {
       ledger.record(changeId, { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens });
     } catch (err) {
@@ -130,7 +137,7 @@ export async function runAgent({ provider, tools, request, ledger, changeId, max
     let finished = null;
     for (const use of toolUses) {
       if (finished) break; // nothing runs after finish
-      onEvent({ type: 'tool', name: use.name, file: use.name === 'finish' ? null : fileHint(use.input) });
+      onEvent({ type: 'tool', name: use.name, file: use.name === 'finish' ? null : fileHint(use.input), modelMs, inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens });
       // An OpenAI-compatible provider sets `inputError` when it could not read the call's arguments.
       // The tool is not run (even if some of the input looks usable); the model is told why.
       const r = use.inputError ? { ok: false, content: `Error: ${use.inputError}` } : tools.execute(use.name, use.input);
